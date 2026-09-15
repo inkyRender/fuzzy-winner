@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Shader Mixer • Above Light + Locks + Env Maps</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: #f5f5f5;
+  font-family: sans-serif;
+  padding: 80px 10px 20px;
+}
+.top-bar {
+  position: fixed;
+  top:0; left:0; right:0;
+  background: white;
+  padding:12px 15px;
+  display:flex;
+  justify-content: flex-end;
+  align-items:center;
+  border-bottom:1px solid #ddd;
+  flex-wrap:wrap;
+  z-index:10;
+  gap: 15px;
+}
+.preview-box {
+  background: white;
+  border-radius:12px;
+  padding:15px;
+  margin-bottom:15px;
+  max-width:900px;
+  margin-left:auto;
+  margin-right:auto;
+  border: 1px solid #eaeaea;
+}
+canvas {
+  display:block;
+  margin:0 auto 20px;
+  border-radius:8px;
+  max-width:100%;
+  height:auto;
+  background: #ffffff;
+  image-rendering: auto;
+}
+.controls {
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
+  gap:12px;
+}
+.control-item {
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  font-size:13px;
+}
+.control-row {
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.lock-btn {
+  padding:2px 8px;
+  border:none;
+  border-radius:4px;
+  font-size:11px;
+  cursor:pointer;
+  white-space:nowrap;
+  transition:all 0.2s;
+}
+.lock-btn.locked {
+  background: #ff6b6b;
+  color: white;
+}
+.lock-btn.unlocked {
+  background: #e0e0e0;
+  color: #333;
+}
+.lock-btn:hover {
+  opacity:0.8;
+}
+.control-item label {
+  font-weight: 500;
+  color: #333;
+  display:flex;
+  justify-content:space-between;
+  flex:1;
+}
+.control-item input[type="range"] {
+  width: 100%;
+  cursor: pointer;
+  accent-color: #00a2e8;
+}
+.control-item input[type="range"]:disabled {
+  opacity:0.4;
+  cursor:not-allowed;
+}
+.section-header {
+  margin: 20px 0 10px;
+  font-weight: 600;
+  color: #555;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding-bottom:4px;
+  border-bottom:1px solid #eee;
+}
+.palette-wrap {
+  display: flex;
+  align-items:center;
+  gap: 8px;
+}
+.palette {
+  display:grid;
+  grid-template-columns:repeat(14, 20px);
+  gap:4px;
+}
+.swatch {
+  width:20px; height:20px;
+  border-radius:4px;
+  border:1px solid rgba(0,0,0,.25);
+  cursor:pointer;
+}
+.swatch.selected {
+  outline:2px solid #000;
+  outline-offset:1px;
+}
+h3 {
+  margin-bottom:15px;
+  color:#333;
+}
+.note {
+  font-size: 12px;
+  color: #00a2e8;
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: #e6f3fc;
+  border-radius: 6px;
+}
+.perf {
+  color: #22b14c;
+  font-weight: bold;
+  font-size: 12px;
+}
+.env-upload-area {
+  border: 2px dashed #00a2e8;
+  border-radius: 8px;
+  padding: 15px;
+  text-align: center;
+  margin: 10px 0;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.env-upload-area:hover {
+  background: #f0f8ff;
+}
+.env-preview {
+  width: 100%;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 6px;
+  margin-top: 8px;
+  display: none;
+}
+.env-preview.loaded {
+  display: block;
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+
+const GRID = 64;
+const LAYERS = 64;
+const DOT_RADIUS = 2.5;
+const SPACING = 3.5;
+const CANVAS_SIZE = 700;
+const FOG_COLOR = {r:255, g:255, b:255};
+const GROUND_Y = 25;
+const SPHERE_RADIUS = 18;
+
+const MS_PAINT_COLORS = [
+  '#000000', '#7f7f7f', '#880015', '#ed1c24', '#ff7f27', '#fff200', '#22b14c', '#00a2e8', '#3f48cc', '#a349a4', '#ffffff', '#c3c3c3', '#b97a57', '#ffaec9',
+  '#404040', '#b5b5b5', '#b97a57', '#f4cccc', '#ffc90e', '#efe4b0', '#b5e61d', '#99d9ea', '#7092be', '#c8bfe7', '#e5e5e5', '#d9d2e9', '#ead1dc', '#fce5cd'
+];
+
+const key = (x,y,z) => `${x},${y},${z}`;
+const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+const normalize = v => {
+  const l = Math.hypot(v.x, v.y, v.z) || 1;
+  return {x:v.x/l, y:v.y/l, z:v.z/l};
+};
+const dot = (a,b) => a.x*b.x + a.y*b.y + a.z*b.z;
+const hexToRgb = h => {
+  const s = h.replace('#','');
+  return {r:parseInt(s.slice(0,2),16)||0,g:parseInt(s.slice(2,4),16)||0,b:parseInt(s.slice(4,6),16)||0};
+};
+
+const getCurvatureFactor = (x, y, z, center) => {
+  const dx = x - center;
+  const dy = y - center;
+  const dz = z - center;
+  const distFromCenter = Math.sqrt(dx*dx + dy*dy + dz*dz);
+  const surfaceFactor = distFromCenter / SPHERE_RADIUS;
+  const curvature = 0.4 + Math.pow(surfaceFactor, 2.2) * 1.6;
+  return clamp(curvature, 0.3, 2.0);
+};
+
+const project = (x, y, z, rotX, rotY, rotZ) => {
+  let px = x - GRID/2;
+  let py = y - GRID/2;
+  let pz = z - GRID/2;
+  const rx = rotX * Math.PI / 180;
+  let y1 = py * Math.cos(rx) - pz * Math.sin(rx);
+  let z1 = py * Math.sin(rx) + pz * Math.cos(rx);
+  py = y1; pz = z1;
+  const ry = rotY * Math.PI / 180;
+  let x2 = px * Math.cos(ry) + pz * Math.sin(ry);
+  let z2 = -px * Math.sin(ry) + pz * Math.cos(ry);
+  px = x2; pz = z2;
+  const rz = rotZ * Math.PI / 180;
+  let x3 = px * Math.cos(rz) - py * Math.sin(rz);
+  let y3 = px * Math.sin(rz) + py * Math.cos(rz);
+  px = x3; py = y3;
+  return { x: px, y: py - pz * 0.4, z: pz };
+};
+
+const projectShadow = (x,y,z, lx,ly,lz, groundY) => {
+  const dx = x - lx, dy = y - ly, dz = z - lz;
+  const t = (groundY - ly) / dy;
+  return { x: lx + dx * t, y: groundY, z: lz + dz * t };
+};
+
+const causticPattern = (sx, sz, lx, ly, lz, time, intensity, curvatureFactor) => {
+  const cen = GRID / 2;
+  const toLightLen = Math.hypot(lx - cen, lz - cen) || 1;
+  const tlx = (lx - cen) / toLightLen;
+  const tlz = (lz - cen) / toLightLen;
+  const proj = (sx - cen) * tlx + (sz - cen) * tlz;
+  if (proj > 3) return 0;
+  const perpDist = Math.hypot((sx - cen) - proj * tlx, (sz - cen) - proj * tlz);
+  const ring = Math.exp(-Math.pow((perpDist - 11 - Math.sin(time * 0.0005) * 1.5), 2) / 10);
+  const inner = Math.exp(-Math.pow((perpDist - 4), 2) / 4);
+  const depth = Math.exp(-proj * proj / 35);
+  const forward = proj < 0 ? Math.exp(proj * 0.12) : 0;
+  return clamp((ring * 1.3 + inner * 0.5) * depth * forward * intensity * curvatureFactor, 0, 1);
+};
+
+const phongShade = (x,y,z, lx,ly,lz, cx,cy,cz, base, power, inten, envMap, envStrength) => {
+  const n = normalize({x:x-cx, y:y-cy, z:z-cz});
+  const l = normalize({x:lx-x, y:ly-y, z:lz-z});
+  const v = normalize({x:cx-x, y:cy-y, z:80-z});
+  const h = normalize({x:l.x+v.x, y:l.y+v.y, z:l.z+v.z});
+  const diff = Math.max(0.15, Math.abs(dot(n,l)));
+  let spec = Math.pow(Math.max(0,dot(n,h)), power);
+  if (spec < 0.1) spec = 0;
+  const c = hexToRgb(base);
+  
+  let envR = 0, envG = 0, envB = 0;
+  if (envMap) {
+    const nx = Math.floor((n.x + 1) * 0.5 * envMap.width);
+    const ny = Math.floor((n.y + 1) * 0.5 * envMap.height);
+    if (envMap.data && nx >= 0 && ny >= 0 && nx < envMap.width && ny < envMap.height) {
+      const idx = (ny * envMap.width + nx) * 4;
+      envR = envMap.data[idx] * envStrength;
+      envG = envMap.data[idx + 1] * envStrength;
+      envB = envMap.data[idx + 2] * envStrength;
+    }
+  }
+  
+  return {
+    r: clamp(c.r*diff + 255*spec*inten + envR, 0, 255),
+    g: clamp(c.g*diff + 255*spec*inten + envG, 0, 255),
+    b: clamp(c.b*diff + 255*spec*inten + envB, 0, 255)
+  };
+};
+
+const bulletShade = (x,y,z, lx,ly,lz, cx,cy,cz, base, rough, envMap, envStrength) => {
+  const n = normalize({x:x-cx, y:y-cy, z:z-cz});
+  const l = normalize({x:lx-x, y:ly-y, z:lz-z});
+  const v = normalize({x:cx-x, y:cy-y, z:80-z});
+  const h = normalize({x:l.x+v.x, y:l.y+v.y, z:l.z+v.z});
+  const diff = Math.max(0.1, Math.abs(dot(n,l))) * (1-rough);
+  const spec = Math.pow(Math.max(0,dot(n,h)), Math.max(10, 90/(rough+0.15)));
+  const c = hexToRgb(base);
+  
+  let envR = 0, envG = 0, envB = 0;
+  if (envMap) {
+    const nx = Math.floor((n.x + 1) * 0.5 * envMap.width);
+    const ny = Math.floor((n.y + 1) * 0.5 * envMap.height);
+    if (envMap.data && nx >= 0 && ny >= 0 && nx < envMap.width && ny < envMap.height) {
+      const idx = (ny * envMap.width + nx) * 4;
+      envR = envMap.data[idx] * envStrength;
+      envG = envMap.data[idx + 1] * envStrength;
+      envB = envMap.data[idx + 2] * envStrength;
+    }
+  }
+  
+  return {
+    r: clamp(c.r*diff + 220*spec + envR, 0, 255),
+    g: clamp(c.g*diff + 215*spec + envG, 0, 255),
+    b: clamp(c.b*diff + 210*spec + envB, 0, 255)
+  };
+};
+
+const glassShade = (x,y,z, lx,ly,lz, cx,cy,cz, base, strength, envMap, envStrength) => {
+  const n = normalize({x:x-cx, y:y-cy, z:z-cz});
+  const v = normalize({x:cx-x, y:cy-y, z:80-z});
+  const fres = Math.pow(1-Math.max(0,Math.abs(dot(n,v))), 3.5);
+  const c = hexToRgb(base);
+  
+  let envR = 0, envG = 0, envB = 0;
+  if (envMap) {
+    const nx = Math.floor((n.x + 1) * 0.5 * envMap.width);
+    const ny = Math.floor((n.y + 1) * 0.5 * envMap.height);
+    if (envMap.data && nx >= 0 && ny >= 0 && nx < envMap.width && ny < envMap.height) {
+      const idx = (ny * envMap.width + nx) * 4;
+      envR = envMap.data[idx] * envStrength;
+      envG = envMap.data[idx + 1] * envStrength;
+      envB = envMap.data[idx + 2] * envStrength;
+    }
+  }
+  
+  return {
+    r: clamp(c.r*0.55 + fres*130*strength + envR, 0, 255),
+    g: clamp(c.g*0.55 + fres*150*strength + envG, 0, 255),
+    b: clamp(c.b*0.65 + fres*170*strength + envB, 0, 255)
+  };
+};
+
+const refractSeetru = (x,y,z, lx,ly,lz, cx,cy,cz, base, ior, strength) => {
+  const n = normalize({x:x-cx, y:y-cy, z:z-cz});
+  const l = normalize({x:lx-x, y:ly-y, z:lz-z});
+  const v = normalize({x:cx-x, y:cy-y, z:80-z});
+  const cosTheta = dot(n, l);
+  if (cosTheta >= 0) return { r:0, g:0, b:0, intensity:0 };
+  const eta = 1 / ior;
+  const k = 1 - eta*eta * (1 - cosTheta*cosTheta);
+  if (k < 0) return { r:0, g:0, b:0, intensity:0 };
+  const refractDir = normalize({
+    x: eta*l.x - (eta*cosTheta + Math.sqrt(k)) * n.x,
+    y: eta*l.y - (eta*cosTheta + Math.sqrt(k)) * n.y,
+    z: eta*l.z - (eta*cosTheta + Math.sqrt(k)) * n.z
+  });
+  const exitAngle = dot(refractDir, v);
+  const intensity = Math.max(0, exitAngle) * strength;
+  const c = hexToRgb(base);
+  const depth = Math.exp(-Math.hypot(x-cx, y-cy, z-cz) / 10);
+  return {
+    r: c.r * intensity * depth,
+    g: c.g * intensity * depth,
+    b: c.b * intensity * depth,
+    intensity
+  };
+};
+
+const createSphere = (r=18, c='#00a2e8') => {
+  const m = new Map(), cen=GRID/2;
+  for(let x=0;x<GRID;x++)for(let y=0;y<GRID;y++)for(let z=0;z<LAYERS;z++){
+    if((x-cen)**2+(y-cen)**2+(z-cen)**2 <= r*r) m.set(key(x,y,z),c);
+  }
+  return m;
+};
+
+const updateAllDotsColor = (dots, newColor) => {
+  const updated = new Map();
+  for (const [pos] of dots) updated.set(pos, newColor);
+  return updated;
+};
+
+const LockableSlider = ({ label, value, onChange, min, max, step, locked, onToggleLock }) => (
+  <div className="control-item">
+    <div className="control-row">
+      <label>{label}: {typeof value === 'number' ? value.toFixed(step < 1 ? 2 : 0) : value}</label>
+      <button 
+        className={`lock-btn ${locked ? 'locked' : 'unlocked'}`}
+        onClick={onToggleLock}
+        title={locked ? 'Unlock slider' : 'Lock slider'}
+      >
+        {locked ? '🔒 Locked' : '🔓 Unlocked'}
+      </button>
+    </div>
+    <input 
+      type="range" 
+      min={min} 
+      max={max} 
+      step={step} 
+      value={value} 
+      onChange={onChange}
+      disabled={locked}
+    />
+  </div>
+);
+
+function App() {
+  const [dots, setDots] = useState(()=>createSphere(SPHERE_RADIUS,'#00a2e8'));
+  const [color, setColor] = useState('#00a2e8');
+  
+  const [rotX, setRotX] = useState(20);
+  const [rotY, setRotY] = useState(45);
+  const [rotZ, setRotZ] = useState(0);
+  
+  const [lightPos, setLightPos] = useState({x:32, y:5, z:50}); // ✅ Light ABOVE scene
+  
+  const [phongPower, setPhongPower] = useState(160);
+  const [phongInten, setPhongInten] = useState(1.6);
+  const [phongOpacity, setPhongOpacity] = useState(1.0);
+  const [bulletOpacity, setBulletOpacity] = useState(0.0);
+  const [roughness, setRoughness] = useState(0.25);
+  const [glassOpacity, setGlassOpacity] = useState(0.0);
+  const [glassStrength, setGlassStrength] = useState(0.8);
+  const [ior, setIor] = useState(1.52);
+  const [refractStrength, setRefractStrength] = useState(0.6);
+  const [fogAmount, setFogAmount] = useState(0.15);
+  const [shadowOpacity, setShadowOpacity] = useState(0.008);
+  const [causticInten, setCausticInten] = useState(1.1);
+  const [causticBoost, setCausticBoost] = useState(2.8);
+  const [colorTintStrength, setColorTintStrength] = useState(0.15);
+  const [spreadRadius, setSpreadRadius] = useState(2.0);
+  const [blurStrength, setBlurStrength] = useState(0.5);
+  const [softShadow, setSoftShadow] = useState(true);
+  const [softCaustic, setSoftCaustic] = useState(true);
+  const [envStrength, setEnvStrength] = useState(0.3);
+  const [fps, setFps] = useState(60);
+  
+  const [envMap, setEnvMap] = useState(null);
+  const [envMapPreview, setEnvMapPreview] = useState(null);
+  
+  const [locks, setLocks] = useState({
+    rotX: false, rotY: false, rotZ: false,
+    lightX: false, lightY: false, lightZ: false,
+    phongPower: false, phongInten: false, phongOpacity: false,
+    bulletOpacity: false, roughness: false,
+    glassOpacity: false, glassStrength: false, ior: false, refractStrength: false,
+    fogAmount: false, shadowOpacity: false, causticInten: false, causticBoost: false, colorTintStrength: false,
+    spreadRadius: false, blurStrength: false, envStrength: false
+  });
+  
+  const toggleLock = (key) => {
+    setLocks(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const handleEnvMapUpload = useCallback((e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 128;
+        canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, 128, 64);
+        const data = ctx.getImageData(0, 0, 128, 64);
+        setEnvMap({ width: 128, height: 64, data: data.data });
+        setEnvMapPreview(event.target.result);
+      };
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  }, []);
+
+  const handleColorChange = (newColor) => {
+    setColor(newColor);
+    setDots(prev => updateAllDotsColor(prev, newColor));
+  };
+
+  const canvasRef = useRef(null);
+  const cen = GRID/2;
+  const maxDepth = GRID;
+  const timeRef = useRef(0);
+  const frameCountRef = useRef(0);
+  const lastFpsTimeRef = useRef(performance.now());
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if(!canvas) return;
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const cx = CANVAS_SIZE/2, cy = CANVAS_SIZE/2;
+
+    let animationId;
+    const render = () => {
+      const now = performance.now();
+      frameCountRef.current++;
+      if (now - lastFpsTimeRef.current >= 1000) {
+        setFps(frameCountRef.current);
+        frameCountRef.current = 0;
+        lastFpsTimeRef.current = now;
+      }
+      
+      timeRef.current += 16;
+      const time = timeRef.current;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+      const list = [];
+      for(const [k, baseCol] of dots){
+        const [x,y,z] = k.split(',').map(Number);
+        const p = project(x,y,z,rotX,rotY,rotZ);
+        list.push({x,y,z,baseCol,px:p.x,py:p.y,pz:p.z,depth:p.z});
+      }
+      
+      list.sort((a,b)=>a.depth - b.depth);
+
+      const causticBase = hexToRgb(color);
+
+      // === Step 1: Smooth Soft Shadows ===
+      for(const d of list){
+        const sp = projectShadow(d.x, d.y, d.z, lightPos.x, lightPos.y, lightPos.z, GROUND_Y);
+        const pSp = project(sp.x, sp.y, sp.z, rotX, rotY, rotZ);
+        const distFade = clamp(1 - (Math.hypot(d.x-cen,d.z-cen)/GRID), 0.2, 1);
+        const lHeight = clamp(lightPos.z / LAYERS, 0.25, 1);
+        const baseAlpha = shadowOpacity * distFade * lHeight;
+
+        if (softShadow) {
+          ctx.beginPath();
+          ctx.arc(
+            cx + pSp.x * SPACING, 
+            cy + (pSp.y + 18) * SPACING,
+            DOT_RADIUS * 2.2,
+            0, Math.PI*2
+          );
+          ctx.fillStyle = `rgba(0,0,0,${baseAlpha * 0.35})`;
+          ctx.fill();
+          
+          ctx.beginPath();
+          ctx.arc(
+            cx + pSp.x * SPACING, 
+            cy + (pSp.y + 18) * SPACING,
+            DOT_RADIUS * 1.4,
+            0, Math.PI*2
+          );
+          ctx.fillStyle = `rgba(0,0,0,${baseAlpha * 0.7})`;
+          ctx.fill();
+        }
+
+        ctx.beginPath();
+        ctx.arc(
+          cx + pSp.x * SPACING, 
+          cy + (pSp.y + 18) * SPACING,
+          DOT_RADIUS * 1.1,
+          0, Math.PI*2
+        );
+        ctx.fillStyle = `rgba(0,0,0,${baseAlpha})`;
+        ctx.fill();
+      }
+
+      // === Step 2: WHITE CAUSTICS + SLIGHT COLOR TINT + CURVATURE INTENSITY ===
+      if (glassOpacity > 0.05 || causticInten > 0.05) {
+        for(const d of list){
+          const sp = projectShadow(d.x, d.y, d.z, lightPos.x, lightPos.y, lightPos.z, GROUND_Y);
+          const pSp = project(sp.x, sp.y, sp.z, rotX, rotY, rotZ);
+          const distFade = clamp(1 - (Math.hypot(d.x-cen,d.z-cen)/GRID), 0.2, 1);
+
+          const curvatureFactor = getCurvatureFactor(d.x, d.y, d.z, cen);
+          
+          const caust = causticPattern(sp.x, sp.z, lightPos.x, lightPos.y, lightPos.z, time, causticInten, curvatureFactor);
+          if (caust > 0.03) {
+            const brightMult = 1.0 + glassOpacity * causticBoost;
+            const alpha = caust * distFade * brightMult;
+
+            const colorAmount = colorTintStrength;
+            const whiteAmount = 1 - colorAmount;
+            const r = Math.min(255, 255 * whiteAmount + causticBase.r * colorAmount);
+            const g = Math.min(255, 255 * whiteAmount + causticBase.g * colorAmount);
+            const b = Math.min(255, 255 * whiteAmount + causticBase.b * colorAmount);
+
+            if (softCaustic) {
+              ctx.beginPath();
+              ctx.arc(
+                cx + pSp.x * SPACING, 
+                cy + (pSp.y + 18) * SPACING,
+                DOT_RADIUS * (2.5 + caust * 2.5),
+                0, Math.PI * 2
+              );
+              ctx.fillStyle = `rgba(${r},${g},${b},${Math.min(alpha * 0.35, 0.9)})`;
+              ctx.fill();
+
+              ctx.beginPath();
+              ctx.arc(
+                cx + pSp.x * SPACING, 
+                cy + (pSp.y + 18) * SPACING,
+                DOT_RADIUS * (1.8 + caust * 1.8),
+                0, Math.PI * 2
+              );
+              ctx.fillStyle = `rgba(${r},${g},${b},${Math.min(alpha * 0.6, 0.95)})`;
+              ctx.fill();
+            }
+
+            ctx.beginPath();
+            ctx.arc(
+              cx + pSp.x * SPACING, 
+              cy + (pSp.y + 18) * SPACING,
+              DOT_RADIUS * (1.2 + caust * 1.2),
+              0, Math.PI * 2
+            );
+            ctx.fillStyle = `rgba(${r},${g},${b},${Math.min(alpha, 0.98)})`;
+            ctx.fill();
+
+            if (caust > 0.2) {
+              const hotR = Math.min(255, 255 * 0.95 + causticBase.r * 0.05);
+              const hotG = Math.min(255, 255 * 0.95 + causticBase.g * 0.05);
+              const hotB = Math.min(255, 255 * 0.95 + causticBase.b * 0.05);
+              ctx.beginPath();
+              ctx.arc(
+                cx + pSp.x * SPACING, 
+                cy + (pSp.y + 18) * SPACING,
+                DOT_RADIUS * 0.6,
+                0, Math.PI * 2
+              );
+              ctx.fillStyle = `rgba(${hotR},${hotG},${hotB},${Math.min(alpha * 0.8, 0.98)})`;
+              ctx.fill();
+            }
+          }
+        }
+      }
+
+      // === Step 3: Sphere with Env Lighting + Refraction ===
+      for(const d of list){
+        const p = phongShade(d.x,d.y,d.z,lightPos.x,lightPos.y,lightPos.z,cen,cen,cen,d.baseCol,phongPower,phongInten, envMap, envStrength);
+        const b = bulletShade(d.x,d.y,d.z,lightPos.x,lightPos.y,lightPos.z,cen,cen,cen,d.baseCol,roughness, envMap, envStrength);
+        const g = glassShade(d.x,d.y,d.z,lightPos.x,lightPos.y,lightPos.z,cen,cen,cen,d.baseCol,glassStrength, envMap, envStrength);
+        const refract = refractSeetru(d.x,d.y,d.z,lightPos.x,lightPos.y,lightPos.z,cen,cen,cen,d.baseCol,ior,refractStrength);
+
+        let r = p.r*phongOpacity + b.r*bulletOpacity + g.r*glassOpacity + refract.r*glassOpacity;
+        let grn = p.g*phongOpacity + b.g*bulletOpacity + g.g*glassOpacity + refract.g*glassOpacity;
+        let bue = p.b*phongOpacity + b.b*bulletOpacity + g.b*glassOpacity + refract.b*glassOpacity;
+
+        const depthFactor = (d.depth + maxDepth/2) / maxDepth;
+        const fogFactor = depthFactor * fogAmount;
+        r = r * (1-fogFactor) + FOG_COLOR.r * fogFactor;
+        grn = grn * (1-fogFactor) + FOG_COLOR.g * fogFactor;
+        bue = bue * (1-fogFactor) + FOG_COLOR.b * fogFactor;
+
+        ctx.beginPath();
+        ctx.arc(cx+d.px*SPACING, cy+d.py*SPACING, DOT_RADIUS, 0, Math.PI*2);
+        ctx.fillStyle = `rgb(${clamp(r,0,255)},${clamp(grn,0,255)},${clamp(bue,0,255)})`;
+        ctx.fill();
+      }
+
+      if (spreadRadius > 0.1 && blurStrength > 0) {
+        ctx.save();
+        ctx.globalAlpha = blurStrength;
+        ctx.filter = `blur(${spreadRadius}px)`;
+        ctx.drawImage(canvas, 0, 0);
+        ctx.restore();
+      }
+
+      animationId = requestAnimationFrame(render);
+    };
+
+    animationId = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(animationId);
+  }, [dots,rotX,rotY,rotZ,lightPos,phongPower,phongInten,phongOpacity,bulletOpacity,roughness,glassOpacity,glassStrength,ior,refractStrength,fogAmount,shadowOpacity,causticInten,causticBoost,colorTintStrength,spreadRadius,blurStrength,softShadow,softCaustic,color,cen,envMap,envStrength]);
+
+  return (
+    <>
+      <div className="top-bar">
+        <div className="palette-wrap">
+          <div className="palette">{MS_PAINT_COLORS.map(c=>(
+            <button 
+              key={c} 
+              className={"swatch "+(color===c?'selected':'')} 
+              style={{background:c}} 
+              onClick={()=>handleColorChange(c)}
+            />
+          ))}</div>
+        </div>
+        <div className="perf">⚡ {fps} FPS — ☀️ Above Light + 🔒 Locks + 🌍 Env Maps</div>
+      </div>
+
+      <div className="preview-box">
+        <h3>🔮 Caustics: White + Palette Tint + Curvature + Env Maps</h3>
+        <canvas ref={canvasRef} width={CANVAS_SIZE} height={CANVAS_SIZE}></canvas>
+
+        <div className="section-header">🌍 ENVIRONMENT LIGHTING MAP (PNG)</div>
+        <div className="env-upload-area" onClick={() => document.getElementById('env-upload').click()}>
+          <input 
+            type="file" 
+            id="env-upload" 
+            accept=".png,.jpg,.jpeg,image/*" 
+            style={{display: 'none'}} 
+            onChange={handleEnvMapUpload}
+          />
+          <strong>📁 Click to upload PNG/JPG Environment Map</strong>
+          <p style={{fontSize: '11px', color: '#666', marginTop: '5px'}}>
+            Equirectangular/cubemap lighting image — affects sphere shading
+          </p>
+          {envMapPreview && (
+            <img src={envMapPreview} alt="Env Map Preview" className="env-preview loaded" />
+          )}
+        </div>
+        <div className="controls">
+          <LockableSlider
+            label="Env Map Strength"
+            value={envStrength}
+            onChange={(e) => setEnvStrength(+e.target.value)}
+            min={0} max={1} step={0.05}
+            locked={locks.envStrength}
+            onToggleLock={() => toggleLock('envStrength')}
+          />
+        </div>
+
+        <div className="section-header">💡 LIGHT POSITION — ABOVE SCENE BY DEFAULT</div>
+        <div className="controls">
+          <LockableSlider
+            label="Light X"
+            value={lightPos.x}
+            onChange={(e) => setLightPos(p=>({...p, x:+e.target.value}))}
+            min={0} max={GRID} step={1}
+            locked={locks.lightX}
+            onToggleLock={() => toggleLock('lightX')}
+          />
+          <LockableSlider
+            label="Light Y (Height)"
+            value={lightPos.y}
+            onChange={(e) => setLightPos(p=>({...p, y:+e.target.value}))}
+            min={0} max={GRID} step={1}
+            locked={locks.lightY}
+            onToggleLock={() => toggleLock('lightY')}
+          />
+          <LockableSlider
+            label="Light Z (Depth)"
+            value={lightPos.z}
+            onChange={(e) => setLightPos(p=>({...p, z:+e.target.value}))}
+            min={0} max={LAYERS-1} step={1}
+            locked={locks.lightZ}
+            onToggleLock={() => toggleLock('lightZ')}
+          />
+        </div>
+
+        <div className="section-header">🌑 SHADOW & CAUSTIC SETTINGS</div>
+        <div className="controls">
+          <div className="control-item">
+            <div className="control-row">
+              <label>Soft Shadow: {softShadow ? 'ON' : 'OFF'}</label>
+            </div>
+            <input type="range" min="0" max="1" step="1" value={softShadow ? 1 : 0} onChange={e=>setSoftShadow(+e.target.value === 1)}/>
+          </div>
+          <LockableSlider
+            label="Shadow Opacity"
+            value={shadowOpacity}
+            onChange={(e) => setShadowOpacity(+e.target.value)}
+            min={0.001} max={0.02} step={0.001}
+            locked={locks.shadowOpacity}
+            onToggleLock={() => toggleLock('shadowOpacity')}
+          />
+          <div className="control-item">
+            <div className="control-row">
+              <label>Soft Caustic: {softCaustic ? 'ON' : 'OFF'}</label>
+            </div>
+            <input type="range" min="0" max="1" step="1" value={softCaustic ? 1 : 0} onChange={e=>setSoftCaustic(+e.target.value === 1)}/>
+          </div>
+          <LockableSlider
+            label="Caustic Intensity"
+            value={causticInten}
+            onChange={(e) => setCausticInten(+e.target.value)}
+            min={0} max={2.5} step={0.05}
+            locked={locks.causticInten}
+            onToggleLock={() => toggleLock('causticInten')}
+          />
+          <LockableSlider
+            label="Caustic Boost"
+            value={causticBoost}
+            onChange={(e) => setCausticBoost(+e.target.value)}
+            min={1} max={6} step={0.1}
+            locked={locks.causticBoost}
+            onToggleLock={() => toggleLock('causticBoost')}
+          />
+          <LockableSlider
+            label="Palette Tint Strength"
+            value={colorTintStrength}
+            onChange={(e) => setColorTintStrength(+e.target.value)}
+            min={0} max={0.5} step={0.01}
+            locked={locks.colorTintStrength}
+            onToggleLock={() => toggleLock('colorTintStrength')}
+          />
+        </div>
+
+        <div className="section-header">🌊 GPU BLUR & SPREAD</div>
+        <div className="controls">
+          <LockableSlider
+            label="Spread Radius"
+            value={spreadRadius}
+            onChange={(e) => setSpreadRadius(+e.target.value)}
+            min={0} max={8} step={0.25}
+            locked={locks.spreadRadius}
+            onToggleLock={() => toggleLock('spreadRadius')}
+          />
+          <LockableSlider
+            label="Blur Strength"
+            value={blurStrength}
+            onChange={(e) => setBlurStrength(+e.target.value)}
+            min={0} max={1} step={0.05}
+            locked={locks.blurStrength}
+            onToggleLock={() => toggleLock('blurStrength')}
+          />
+        </div>
+
+        <div className="section-header">🔄 Full 3D Rotation</div>
+        <div className="controls">
+          <LockableSlider
+            label="Rotate X"
+            value={rotX}
+            onChange={(e) => setRotX(+e.target.value)}
+            min={0} max={360} step={1}
+            locked={locks.rotX}
+            onToggleLock={() => toggleLock('rotX')}
+          />
+          <LockableSlider
+            label="Rotate Y"
+            value={rotY}
+            onChange={(e) => setRotY(+e.target.value)}
+            min={0} max={360} step={1}
+            locked={locks.rotY}
+            onToggleLock={() => toggleLock('rotY')}
+          />
+          <LockableSlider
+            label="Rotate Z"
+            value={rotZ}
+            onChange={(e) => setRotZ(+e.target.value)}
+            min={0} max={360} step={1}
+            locked={locks.rotZ}
+            onToggleLock={() => toggleLock('rotZ')}
+          />
+        </div>
+
+        <div className="section-header">✨ Phong Specular</div>
+        <div className="controls">
+          <LockableSlider
+            label="Sharpness"
+            value={phongPower}
+            onChange={(e) => setPhongPower(+e.target.value)}
+            min={40} max={300} step={1}
+            locked={locks.phongPower}
+            onToggleLock={() => toggleLock('phongPower')}
+          />
+          <LockableSlider
+            label="Brightness"
+            value={phongInten}
+            onChange={(e) => setPhongInten(+e.target.value)}
+            min={0} max={3} step={0.1}
+            locked={locks.phongInten}
+            onToggleLock={() => toggleLock('phongInten')}
+          />
+          <LockableSlider
+            label="Opacity"
+            value={phongOpacity}
+            onChange={(e) => setPhongOpacity(+e.target.value)}
+            min={0} max={1} step={0.05}
+            locked={locks.phongOpacity}
+            onToggleLock={() => toggleLock('phongOpacity')}
+          />
+        </div>
+
+        <div className="section-header">🔩 Metal Layer</div>
+        <div className="controls">
+          <LockableSlider
+            label="Opacity"
+            value={bulletOpacity}
+            onChange={(e) => setBulletOpacity(+e.target.value)}
+            min={0} max={1} step={0.05}
+            locked={locks.bulletOpacity}
+            onToggleLock={() => toggleLock('bulletOpacity')}
+          />
+          <LockableSlider
+            label="Roughness"
+            value={roughness}
+            onChange={(e) => setRoughness(+e.target.value)}
+            min={0} max={0.6} step={0.01}
+            locked={locks.roughness}
+            onToggleLock={() => toggleLock('roughness')}
+          />
+        </div>
+
+        <div className="section-header">🔍 GLASS / REFRACTION</div>
+        <div className="controls">
+          <LockableSlider
+            label="Glass Opacity"
+            value={glassOpacity}
+            onChange={(e) => setGlassOpacity(+e.target.value)}
+            min={0} max={1} step={0.05}
+            locked={locks.glassOpacity}
+            onToggleLock={() => toggleLock('glassOpacity')}
+          />
+          <LockableSlider
+            label="Glass Strength"
+            value={glassStrength}
+            onChange={(e) => setGlassStrength(+e.target.value)}
+            min={0} max={1.5} step={0.05}
+            locked={locks.glassStrength}
+            onToggleLock={() => toggleLock('glassStrength')}
+          />
+          <LockableSlider
+            label="IOR (Refraction)"
+            value={ior}
+            onChange={(e) => setIor(+e.target.value)}
+            min={1.0} max={2.5} step={0.05}
+            locked={locks.ior}
+            onToggleLock={() => toggleLock('ior')}
+          />
+          <LockableSlider
+            label="Refract Strength"
+            value={refractStrength}
+            onChange={(e) => setRefractStrength(+e.target.value)}
+            min={0} max={1.5} step={0.05}
+            locked={locks.refractStrength}
+            onToggleLock={() => toggleLock('refractStrength')}
+          />
+        </div>
+
+        <div className="section-header">🌫️ Fog</div>
+        <div className="controls">
+          <LockableSlider
+            label="Fog Density"
+            value={fogAmount}
+            onChange={(e) => setFogAmount(+e.target.value)}
+            min={0} max={1} step={0.05}
+            locked={locks.fogAmount}
+            onToggleLock={() => toggleLock('fogAmount')}
+          />
+        </div>
+
+        <div className="note">
+          ✅ <strong>Light positioned ABOVE scene</strong> by default<br/>
+          🔒 <strong>Lock sliders</strong> to prevent accidental changes<br/>
+          🌍 <strong>Upload PNG environment maps</strong> for realistic ambient lighting<br/>
+          🎨 Caustics: Mostly WHITE + subtle palette tint + curvature-based intensity
+        </div>
+      </div>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
