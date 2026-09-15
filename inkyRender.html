@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>3D Voxel Letter A — Multi-Light Support</title>
+<title>3D Voxel Letter A — Multi-Light Support (Stable)</title>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -308,7 +308,7 @@ h3 { margin-bottom: 15px; color: #333; }
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useRef, useEffect } = React;
+const { useState, useRef, useEffect, useCallback } = React;
 
 const GRID = 64;
 const LAYERS = 64;
@@ -319,6 +319,7 @@ const FOG_COLOR = {r:255, g:255, b:255};
 const GROUND_Y = 25;
 const SPHERE_RADIUS = 18;
 const MAX_LIGHTS = 4;
+const EPSILON = 0.0001;
 
 const MS_PAINT_COLORS = [
   '#000000', '#7f7f7f', '#880015', '#ed1c24', '#ff7f27', '#fff200', '#22b14c', '#00a2e8', '#3f48cc', '#a349a4', '#ffffff', '#c3c3c3', '#b97a57', '#ffaec9',
@@ -331,19 +332,29 @@ const LIGHT_COLOR_PRESETS = [
 
 const key = (x,y,z) => `${x},${y},${z}`;
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+const isFiniteNum = v => typeof v === 'number' && isFinite(v);
+const safeNum = (v, fallback = 0) => isFiniteNum(v) ? v : fallback;
+
 const normalize = v => {
-  const l = Math.hypot(v.x, v.y, v.z) || 1;
-  return {x:v.x/l, y:v.y/l, z:v.z/l};
+  const l = Math.hypot(v.x, v.y, v.z);
+  if (l < EPSILON) return {x: 0, y: -1, z: 0};
+  return {x: v.x / l, y: v.y / l, z: v.z / l};
 };
+
 const dot = (a,b) => a.x*b.x + a.y*b.y + a.z*b.z;
+
 const hexToRgb = h => {
-  const s = h.replace('#','');
-  return {r:parseInt(s.slice(0,2),16)||0,g:parseInt(s.slice(2,4),16)||0,b:parseInt(s.slice(4,6),16)||0};
+  try {
+    const s = h.replace('#','');
+    return {
+      r: safeNum(parseInt(s.slice(0,2),16), 0),
+      g: safeNum(parseInt(s.slice(2,4),16), 0),
+      b: safeNum(parseInt(s.slice(4,6),16), 0)
+    };
+  } catch(e) {
+    return {r: 200, g: 200, b: 200};
+  }
 };
-const rgbToHex = (r,g,b) => '#' + [r,g,b].map(x => {
-  const h = Math.round(clamp(x,0,255)).toString(16);
-  return h.length === 1 ? '0'+h : h;
-}).join('');
 
 const createDefaultLights = () => [
   { id: 1, name: 'Key Light', x: 32, y: 5, z: 50, type: 'point', color: '#ffffff', intensity: 1.0, enabled: true },
@@ -373,68 +384,96 @@ const project = (x, y, z, rotX, rotY, rotZ) => {
   let x3 = px * Math.cos(rz) - py * Math.sin(rz);
   let y3 = px * Math.sin(rz) + py * Math.cos(rz);
   px = x3; py = y3;
-  return { x: px, y: py - pz * 0.4, z: pz };
+  return { 
+    x: safeNum(px), 
+    y: safeNum(py - pz * 0.4), 
+    z: safeNum(pz) 
+  };
 };
 
-const projectShadow = (x,y,z, lx,ly,lz, groundY) => {
-  const dx = x - lx, dy = y - ly, dz = z - lz;
+// SAFE version: guard against division by zero when light is at same height
+const projectShadow = (x, y, z, lx, ly, lz, groundY) => {
+  const dy = y - ly;
+  // If light is almost at same height as voxel, skip this shadow
+  if (Math.abs(dy) < EPSILON) return null;
   const t = (groundY - ly) / dy;
-  return { x: lx + dx * t, y: groundY, z: lz + dz * t };
+  // If t is extreme, skip
+  if (!isFinite(t) || Math.abs(t) > 1000) return null;
+  const sx = lx + (x - lx) * t;
+  const sz = lz + (z - lz) * t;
+  if (!isFinite(sx) || !isFinite(sz)) return null;
+  return { x: sx, y: groundY, z: sz };
 };
 
 const causticPattern = (sx, sz, lx, ly, lz, time, intensity, curvatureFactor) => {
   const cen = GRID / 2;
-  const toLightLen = Math.hypot(lx - cen, lz - cen) || 1;
+  const toLightLen = Math.hypot(lx - cen, lz - cen);
+  if (toLightLen < EPSILON) return 0;
   const tlx = (lx - cen) / toLightLen;
   const tlz = (lz - cen) / toLightLen;
   const proj = (sx - cen) * tlx + (sz - cen) * tlz;
   if (proj > 3) return 0;
   const perpDist = Math.hypot((sx - cen) - proj * tlx, (sz - cen) - proj * tlz);
+  if (!isFinite(perpDist)) return 0;
   const ring = Math.exp(-Math.pow((perpDist - 11 - Math.sin(time * 0.0005) * 1.5), 2) / 10);
   const inner = Math.exp(-Math.pow((perpDist - 4), 2) / 4);
   const depth = Math.exp(-proj * proj / 35);
   const forward = proj < 0 ? Math.exp(proj * 0.12) : 0;
-  return clamp((ring * 1.3 + inner * 0.5) * depth * forward * intensity * curvatureFactor, 0, 1);
+  const result = (ring * 1.3 + inner * 0.5) * depth * forward * intensity * curvatureFactor;
+  return clamp(safeNum(result, 0), 0, 1);
 };
 
 const getStraightANormal = (px, py, pz, cx, cy, cz) => {
   const crossY = cy + 5;
-  const segDist = (x,y,ax,ay,bx,by) => {
-    const dx=bx-ax, dy=by-ay, l2=dx*dx+dy*dy||1;
-    let t=((x-ax)*dx+(y-ay)*dy)/l2;
-    t=Math.max(0,Math.min(1,t));
-    return Math.hypot(x-(ax+t*dx), y-(ay+t*dy));
+  const segDist = (x, y, ax, ay, bx, by) => {
+    const dx = bx - ax, dy = by - ay;
+    const l2 = dx * dx + dy * dy;
+    if (l2 < EPSILON) return Math.hypot(x - ax, y - ay);
+    let t = ((x - ax) * dx + (y - ay) * dy) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(x - (ax + t * dx), y - (ay + t * dy));
   };
-  const ldx=cx-(cx-19), ldy=(cy-20)-(cy+20), llen=Math.hypot(ldx,ldy)||1;
-  const rdx=(cx+19)-cx, rdy=(cy+20)-(cy-20), rlen=Math.hypot(rdx,rdy)||1;
+  const ldx = cx - (cx - 19), ldy = (cy - 20) - (cy + 20);
+  const llen = Math.hypot(ldx, ldy) || 1;
+  const rdx = (cx + 19) - cx, rdy = (cy + 20) - (cy - 20);
+  const rlen = Math.hypot(rdx, rdy) || 1;
   let n;
-  if (Math.abs(py-crossY)<=4 && px>=cx-14 && px<=cx+14) n={x:0,y:-1,z:0};
-  else if (segDist(px,py,cx-19,cy+20,cx,cy-20) <= segDist(px,py,cx,cy-20,cx+19,cy+20))
-    n={x:-ldy/llen,y:ldx/llen,z:0};
-  else
-    n={x:-rdy/rlen,y:rdx/rlen,z:0};
-  if (Math.abs(pz-cz)>=8) n={x:0,y:0,z:pz>=cz?1:-1};
+  if (Math.abs(py - crossY) <= 4 && px >= cx - 14 && px <= cx + 14) {
+    n = {x: 0, y: -1, z: 0};
+  } else if (segDist(px, py, cx - 19, cy + 20, cx, cy - 20) <= 
+             segDist(px, py, cx, cy - 20, cx + 19, cy + 20)) {
+    n = {x: -ldy / llen, y: ldx / llen, z: 0};
+  } else {
+    n = {x: -rdy / rlen, y: rdx / rlen, z: 0};
+  }
+  if (Math.abs(pz - cz) >= 8) {
+    n = {x: 0, y: 0, z: pz >= cz ? 1 : -1};
+  }
   return normalize(n);
 };
 
-const getLightDirection = (x,y,z,lx,ly,lz,type) => {
-  if(type === 'hemisphere') return normalize({x:0,y:-1,z:0});
-  return normalize({x:lx-x,y:ly-y,z:lz-z});
+const getLightDirection = (x, y, z, lx, ly, lz, type) => {
+  if (type === 'hemisphere') return {x: 0, y: -1, z: 0};
+  const dx = lx - x, dy = ly - y, dz = lz - z;
+  const len = Math.hypot(dx, dy, dz);
+  if (len < EPSILON) return {x: 0, y: -1, z: 0};
+  return {x: dx / len, y: dy / len, z: dz / len};
 };
 
-const phongShadeMulti = (x,y,z, lights, cx,cy,cz, base, power, inten) => {
-  const n = getStraightANormal(x,y,z,cx,cy,cz);
-  const v = normalize({x:cx-x,y:cy-y,z:80-z});
+const phongShadeMulti = (x, y, z, lights, cx, cy, cz, base, power, inten) => {
+  const n = getStraightANormal(x, y, z, cx, cy, cz);
+  const v = normalize({x: cx - x, y: cy - y, z: 80 - z});
   const c = hexToRgb(base);
-  const getEdgeFactor = (px,py,pz,cx,cy) => {
-    const crossY=cy+5;
-    const d=Math.min(Math.abs(py-(cy-20)),Math.abs(py-(cy+20)),Math.abs(py-crossY));
-    return Math.max(0,1-d/6);
-  };
-  const edge = getEdgeFactor(x,y,z,cx,cy);
-  const edgeLift = 1 + edge*0.22;
   
-  let result={r:0,g:0,b:0};
+  const getEdgeFactor = (px, py, pz, cx, cy) => {
+    const crossY = cy + 5;
+    const d = Math.min(Math.abs(py - (cy - 20)), Math.abs(py - (cy + 20)), Math.abs(py - crossY));
+    return Math.max(0, 1 - d / 6);
+  };
+  const edge = getEdgeFactor(x, y, z, cx, cy);
+  const edgeLift = 1 + edge * 0.22;
+  
+  let result = {r: 0, g: 0, b: 0};
   const enabledLights = lights.filter(l => l.enabled);
   
   if (enabledLights.length === 0) {
@@ -448,212 +487,296 @@ const phongShadeMulti = (x,y,z, lights, cx,cy,cz, base, power, inten) => {
   
   for (const light of enabledLights) {
     const lc = hexToRgb(light.color);
-    const li = light.intensity;
+    const li = safeNum(light.intensity, 1);
+    const lr = lc.r / 255, lg = lc.g / 255, lb = lc.b / 255;
     
-    const evaluate = (L, weight=1) => {
-      const h = normalize({x:L.x+v.x,y:L.y+v.y,z:L.z+v.z});
-      const diff = Math.max(0.15, dot(n,L));
-      let spec = Math.pow(Math.max(0,dot(n,h)),power);
-      if(spec < 0.1) spec=0;
-      const grazing = Math.pow(Math.max(0,1-Math.abs(dot(n,v))),3.5)*edge*0.42;
-      spec = Math.min(1.5, spec*edgeLift + grazing);
+    const evaluate = (L, weight = 1) => {
+      const hx = L.x + v.x, hy = L.y + v.y, hz = L.z + v.z;
+      const hlen = Math.hypot(hx, hy, hz);
+      const h = hlen > EPSILON ? {x: hx/hlen, y: hy/hlen, z: hz/hlen} : {x:0, y:-1, z:0};
+      
+      const nDotL = dot(n, L);
+      const diff = Math.max(0.15, nDotL);
+      const nDotH = dot(n, h);
+      let spec = nDotH > 0.1 ? Math.pow(nDotH, power) : 0;
+      
+      const nDotV = Math.abs(dot(n, v));
+      const grazing = Math.pow(Math.max(0, 1 - nDotV), 3.5) * edge * 0.42;
+      spec = Math.min(1.5, spec * edgeLift + grazing);
+      
+      const w = weight * li;
       return {
-        r: (c.r*diff*edgeLift * (lc.r/255) + 255*spec*inten * (lc.r/255)) * weight * li,
-        g: (c.g*diff*edgeLift * (lc.g/255) + 255*spec*inten * (lc.g/255)) * weight * li,
-        b: (c.b*diff*edgeLift * (lc.b/255) + 255*spec*inten * (lc.b/255)) * weight * li
+        r: (c.r * diff * edgeLift * lr + 255 * spec * inten * lr) * w,
+        g: (c.g * diff * edgeLift * lg + 255 * spec * inten * lg) * w,
+        b: (c.b * diff * edgeLift * lb + 255 * spec * inten * lb) * w
       };
     };
     
-    const pointOn = light.type === 'point';
-    const areaOn = light.type === 'area';
-    const hemiOn = light.type === 'hemisphere';
-    
-    if(pointOn){
-      const L = getLightDirection(x,y,z,light.x,light.y,light.z,'point');
+    if (light.type === 'point') {
+      const L = getLightDirection(x, y, z, light.x, light.y, light.z, 'point');
       const q = evaluate(L, 1);
       result.r += q.r; result.g += q.g; result.b += q.b;
     }
-    if(areaOn){
-      const s=8, samples=[
-        {x:light.x-s,y:light.y,z:light.z-s},{x:light.x+s,y:light.y,z:light.z-s},
-        {x:light.x-s,y:light.y,z:light.z+s},{x:light.x+s,y:light.y,z:light.z+s},
-        {x:light.x,y:light.y+s*0.5,z:light.z}
+    if (light.type === 'area') {
+      const s = 8;
+      const samples = [
+        {x: light.x - s, y: light.y, z: light.z - s},
+        {x: light.x + s, y: light.y, z: light.z - s},
+        {x: light.x - s, y: light.y, z: light.z + s},
+        {x: light.x + s, y: light.y, z: light.z + s},
+        {x: light.x, y: light.y + s * 0.5, z: light.z}
       ];
-      for(const p of samples){
-        const L = normalize({x:p.x-x,y:p.y-y,z:p.z-z});
-        const q = evaluate(L, 1/samples.length);
+      for (const p of samples) {
+        const L = normalize({x: p.x - x, y: p.y - y, z: p.z - z});
+        const q = evaluate(L, 1 / samples.length);
         result.r += q.r; result.g += q.g; result.b += q.b;
       }
     }
-    if(hemiOn){
-      const up={x:0,y:-1,z:0}, down={x:0,y:1,z:0};
-      const topAmount=0.72*(0.5+0.5*dot(n,up));
-      const bottomAmount=0.28*(0.5+0.5*dot(n,down));
-      const top=evaluate(up,topAmount), bottom=evaluate(down,bottomAmount);
-      result.r+=top.r+bottom.r; result.g+=top.g+bottom.g; result.b+=top.b+bottom.b;
+    if (light.type === 'hemisphere') {
+      const up = {x: 0, y: -1, z: 0};
+      const down = {x: 0, y: 1, z: 0};
+      const nDotUp = dot(n, up);
+      const nDotDown = dot(n, down);
+      const topAmount = 0.72 * (0.5 + 0.5 * nDotUp);
+      const bottomAmount = 0.28 * (0.5 + 0.5 * nDotDown);
+      const top = evaluate(up, topAmount);
+      const bottom = evaluate(down, bottomAmount);
+      result.r += top.r + bottom.r;
+      result.g += top.g + bottom.g;
+      result.b += top.b + bottom.b;
     }
   }
   
-  return {r:clamp(result.r,0,255),g:clamp(result.g,0,255),b:clamp(result.b,0,255)};
+  return {
+    r: clamp(safeNum(result.r, 0), 0, 255),
+    g: clamp(safeNum(result.g, 0), 0, 255),
+    b: clamp(safeNum(result.b, 0), 0, 255)
+  };
 };
 
-const bulletShadeMulti = (x,y,z, lights, cx,cy,cz, base, rough) => {
-  const n = getStraightANormal(x,y,z,cx,cy,cz);
-  const v = normalize({x:cx-x,y:cy-y,z:80-z});
+const bulletShadeMulti = (x, y, z, lights, cx, cy, cz, base, rough) => {
+  const n = getStraightANormal(x, y, z, cx, cy, cz);
+  const v = normalize({x: cx - x, y: cy - y, z: 80 - z});
   const c = hexToRgb(base);
   
-  let result={r:0,g:0,b:0};
+  let result = {r: 0, g: 0, b: 0};
   const enabledLights = lights.filter(l => l.enabled);
+  if (enabledLights.length === 0) return {r: 0, g: 0, b: 0};
   
-  if (enabledLights.length === 0) return {r:0,g:0,b:0};
+  const specPower = Math.max(10, 90 / (rough + 0.15));
+  const diffFactor = 1 - rough;
   
   for (const light of enabledLights) {
     const lc = hexToRgb(light.color);
-    const li = light.intensity;
-    const l = getLightDirection(x,y,z,light.x,light.y,light.z,light.type);
-    const h = normalize({x:l.x+v.x,y:l.y+v.y,z:l.z+v.z});
-    const diff = Math.max(0.1, Math.abs(dot(n,l))) * (1-rough);
-    const spec = Math.pow(Math.max(0,dot(n,h)), Math.max(10, 90/(rough+0.15)));
-    result.r += (c.r*diff*(lc.r/255) + 220*spec*(lc.r/255)) * li;
-    result.g += (c.g*diff*(lc.g/255) + 215*spec*(lc.g/255)) * li;
-    result.b += (c.b*diff*(lc.b/255) + 210*spec*(lc.b/255)) * li;
+    const li = safeNum(light.intensity, 1);
+    const L = getLightDirection(x, y, z, light.x, light.y, light.z, light.type);
+    
+    const hx = L.x + v.x, hy = L.y + v.y, hz = L.z + v.z;
+    const hlen = Math.hypot(hx, hy, hz);
+    const h = hlen > EPSILON ? {x: hx/hlen, y: hy/hlen, z: hz/hlen} : {x:0, y:-1, z:0};
+    
+    const nDotL = Math.abs(dot(n, L));
+    const diff = Math.max(0.1, nDotL) * diffFactor;
+    const nDotH = dot(n, h);
+    const spec = nDotH > 0 ? Math.pow(nDotH, specPower) : 0;
+    
+    result.r += (c.r * diff * (lc.r/255) + 220 * spec * (lc.r/255)) * li;
+    result.g += (c.g * diff * (lc.g/255) + 215 * spec * (lc.g/255)) * li;
+    result.b += (c.b * diff * (lc.b/255) + 210 * spec * (lc.b/255)) * li;
   }
   
-  return {r:clamp(result.r,0,255),g:clamp(result.g,0,255),b:clamp(result.b,0,255)};
+  return {
+    r: clamp(safeNum(result.r, 0), 0, 255),
+    g: clamp(safeNum(result.g, 0), 0, 255),
+    b: clamp(safeNum(result.b, 0), 0, 255)
+  };
 };
 
-const glassShadeMulti = (x,y,z, lights, cx,cy,cz, base, strength) => {
-  const n = getStraightANormal(x,y,z,cx,cy,cz);
-  const v = normalize({x:cx-x,y:cy-y,z:80-z});
-  const fres = Math.pow(1-Math.max(0,Math.abs(dot(n,v))), 3.5);
+const glassShadeMulti = (x, y, z, lights, cx, cy, cz, base, strength) => {
+  const n = getStraightANormal(x, y, z, cx, cy, cz);
+  const v = normalize({x: cx - x, y: cy - y, z: 80 - z});
+  const nDotV = Math.abs(dot(n, v));
+  const fres = Math.pow(1 - Math.max(0, nDotV), 3.5);
   const c = hexToRgb(base);
   
-  let colorTint = {r:0, g:0, b:0};
+  let colorTint = {r: 0, g: 0, b: 0};
   const enabledLights = lights.filter(l => l.enabled);
   let totalIntensity = 0;
   
   for (const light of enabledLights) {
     const lc = hexToRgb(light.color);
-    colorTint.r += lc.r * light.intensity;
-    colorTint.g += lc.g * light.intensity;
-    colorTint.b += lc.b * light.intensity;
-    totalIntensity += light.intensity;
+    const li = safeNum(light.intensity, 1);
+    colorTint.r += lc.r * li;
+    colorTint.g += lc.g * li;
+    colorTint.b += lc.b * li;
+    totalIntensity += li;
   }
   
-  if (totalIntensity > 0) {
+  if (totalIntensity > EPSILON) {
     colorTint.r /= totalIntensity;
     colorTint.g /= totalIntensity;
     colorTint.b /= totalIntensity;
   } else {
-    colorTint = {r:255, g:255, b:255};
+    colorTint = {r: 255, g: 255, b: 255};
   }
   
   return {
-    r: clamp(c.r*0.55 + fres*130*strength*(colorTint.r/255), 0, 255),
-    g: clamp(c.g*0.55 + fres*150*strength*(colorTint.g/255), 0, 255),
-    b: clamp(c.b*0.65 + fres*170*strength*(colorTint.b/255), 0, 255)
+    r: clamp(safeNum(c.r * 0.55 + fres * 130 * strength * (colorTint.r / 255), 0), 0, 255),
+    g: clamp(safeNum(c.g * 0.55 + fres * 150 * strength * (colorTint.g / 255), 0), 0, 255),
+    b: clamp(safeNum(c.b * 0.65 + fres * 170 * strength * (colorTint.b / 255), 0), 0, 255)
   };
 };
 
-const refractSeetruMulti = (x,y,z, lights, cx,cy,cz, base, ior, strength) => {
-  const n = getStraightANormal(x,y,z,cx,cy,cz);
-  const v = normalize({x:cx-x,y:cy-y,z:80-z});
+const refractSeetruMulti = (x, y, z, lights, cx, cy, cz, base, ior, strength) => {
+  const n = getStraightANormal(x, y, z, cx, cy, cz);
+  const v = normalize({x: cx - x, y: cy - y, z: 80 - z});
   const c = hexToRgb(base);
-  const depth = Math.exp(-Math.hypot(x-cx,y-cy,z-cz)/10);
+  const depthFactor = Math.exp(-Math.hypot(x - cx, y - cy, z - cz) / 10);
   
-  let result={r:0,g:0,b:0,intensity:0};
+  let result = {r: 0, g: 0, b: 0, intensity: 0};
   const enabledLights = lights.filter(l => l.enabled);
   
   for (const light of enabledLights) {
     const lc = hexToRgb(light.color);
-    const li = light.intensity;
-    const l = getLightDirection(x,y,z,light.x,light.y,light.z,light.type);
-    const cosTheta = dot(n,l);
-    if(cosTheta >= 0) continue;
-    const eta=1/ior, k=1-eta*eta*(1-cosTheta*cosTheta);
-    if(k<0) continue;
-    const refractDir=normalize({
-      x:eta*l.x-(eta*cosTheta+Math.sqrt(k))*n.x,
-      y:eta*l.y-(eta*cosTheta+Math.sqrt(k))*n.y,
-      z:eta*l.z-(eta*cosTheta+Math.sqrt(k))*n.z
-    });
-    const intensity = Math.max(0,dot(refractDir,v))*strength*li;
-    result.r += c.r*intensity*depth*(lc.r/255);
-    result.g += c.g*intensity*depth*(lc.g/255);
-    result.b += c.b*intensity*depth*(lc.b/255);
+    const li = safeNum(light.intensity, 1);
+    const L = getLightDirection(x, y, z, light.x, light.y, light.z, light.type);
+    const cosTheta = dot(n, L);
+    
+    if (cosTheta >= 0) continue;
+    
+    const eta = 1 / ior;
+    const k = 1 - eta * eta * (1 - cosTheta * cosTheta);
+    
+    if (k < 0) continue;
+    
+    const sqrtK = Math.sqrt(k);
+    const rdx = eta * L.x - (eta * cosTheta + sqrtK) * n.x;
+    const rdy = eta * L.y - (eta * cosTheta + sqrtK) * n.y;
+    const rdz = eta * L.z - (eta * cosTheta + sqrtK) * n.z;
+    const refractDir = normalize({x: rdx, y: rdy, z: rdz});
+    
+    const rDotV = dot(refractDir, v);
+    const intensity = Math.max(0, rDotV) * strength * li;
+    
+    result.r += c.r * intensity * depthFactor * (lc.r / 255);
+    result.g += c.g * intensity * depthFactor * (lc.g / 255);
+    result.b += c.b * intensity * depthFactor * (lc.b / 255);
     result.intensity += intensity;
   }
   
-  return result;
+  return {
+    r: safeNum(result.r, 0),
+    g: safeNum(result.g, 0),
+    b: safeNum(result.b, 0),
+    intensity: safeNum(result.intensity, 0)
+  };
 };
 
-const createLetterA = (c='#00a2e8') => {
-  const m=new Map(), cen=GRID/2, thickness=3, zMin=cen-10, zMax=cen+10;
-  const top=cen-20, bottom=cen+20, left=cen-19, right=cen+19, apexX=cen, crossY=cen+5;
-  const pointSegmentDistance=(px,py,ax,ay,bx,by)=>{
-    const abx=bx-ax,aby=by-ay,l2=abx*abx+aby*aby||1;
-    let t=((px-ax)*abx+(py-ay)*aby)/l2;
-    t=Math.max(0,Math.min(1,t));
-    return Math.hypot(px-(ax+abx*t),py-(ay+aby*t));
+const createLetterA = (c = '#00a2e8') => {
+  const m = new Map();
+  const cen = GRID / 2;
+  const thickness = 3;
+  const zMin = cen - 10, zMax = cen + 10;
+  const top = cen - 20, bottom = cen + 20;
+  const left = cen - 19, right = cen + 19;
+  const apexX = cen, crossY = cen + 5;
+  
+  const pointSegmentDistance = (px, py, ax, ay, bx, by) => {
+    const abx = bx - ax, aby = by - ay;
+    const l2 = abx * abx + aby * aby;
+    if (l2 < EPSILON) return Math.hypot(px - ax, py - ay);
+    let t = ((px - ax) * abx + (py - ay) * aby) / l2;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (ax + abx * t), py - (ay + aby * t));
   };
-  for(let x=cen-24;x<=cen+24;x++){
-    for(let y=cen-22;y<=cen+22;y++){
-      const leftDist=pointSegmentDistance(x,y,left,bottom,apexX,top);
-      const rightDist=pointSegmentDistance(x,y,right,bottom,apexX,top);
-      const isLeg=leftDist<=thickness||rightDist<=thickness;
-      const isCrossbar=Math.abs(y-crossY)<=thickness&&x>=cen-13&&x<=cen+13;
-      if(isLeg||isCrossbar) for(let z=zMin;z<=zMax;z++) m.set(key(x,y,z),c);
+  
+  for (let x = cen - 24; x <= cen + 24; x++) {
+    for (let y = cen - 22; y <= cen + 22; y++) {
+      const leftDist = pointSegmentDistance(x, y, left, bottom, apexX, top);
+      const rightDist = pointSegmentDistance(x, y, right, bottom, apexX, top);
+      const isLeg = leftDist <= thickness || rightDist <= thickness;
+      const isCrossbar = Math.abs(y - crossY) <= thickness && x >= cen - 13 && x <= cen + 13;
+      if (isLeg || isCrossbar) {
+        for (let z = zMin; z <= zMax; z++) {
+          m.set(key(x, y, z), c);
+        }
+      }
     }
   }
   return m;
 };
 
 const updateAllDotsColor = (dots, newColor) => {
-  const updated=new Map();
-  for(const [pos] of dots) updated.set(pos,newColor);
+  const updated = new Map();
+  for (const [pos] of dots) {
+    updated.set(pos, newColor);
+  }
   return updated;
 };
 
-const LockableSlider = ({label,value,onChange,min,max,step,locked,onToggleLock})=>(
+const LockableSlider = ({label, value, onChange, min, max, step, locked, onToggleLock}) => (
   <div className="control-item">
     <div className="control-row">
-      <label>{label}: {typeof value==='number'?value.toFixed(step<1?2:0):value}</label>
-      <button className={`lock-btn ${locked?'locked':'unlocked'}`} onClick={onToggleLock}
-        title={locked?'Unlock slider':'Lock slider'}>
-        {locked?'🔒 Locked':'🔓 Unlocked'}
+      <label>{label}: {typeof value === 'number' ? value.toFixed(step < 1 ? 2 : 0) : value}</label>
+      <button 
+        className={`lock-btn ${locked ? 'locked' : 'unlocked'}`} 
+        onClick={onToggleLock}
+        title={locked ? 'Unlock slider' : 'Lock slider'}
+      >
+        {locked ? '🔒 Locked' : '🔓 Unlocked'}
       </button>
     </div>
-    <input type="range" min={min} max={max} step={step} value={value}
-      onChange={onChange} disabled={locked}/>
+    <input 
+      type="range" 
+      min={min} max={max} step={step} 
+      value={value}
+      onChange={onChange} 
+      disabled={locked}
+    />
   </div>
 );
 
-function App(){
-  const [dots,setDots]=useState(()=>createLetterA('#00a2e8'));
-  const [color,setColor]=useState('#00a2e8');
-  const [rotX,setRotX]=useState(20), [rotY,setRotY]=useState(45), [rotZ,setRotZ]=useState(0);
+function App() {
+  const [dots, setDots] = useState(() => createLetterA('#00a2e8'));
+  const [color, setColor] = useState('#00a2e8');
+  const [rotX, setRotX] = useState(20);
+  const [rotY, setRotY] = useState(45);
+  const [rotZ, setRotZ] = useState(0);
   const [lights, setLights] = useState(createDefaultLights);
   const [activeLightId, setActiveLightId] = useState(1);
   
-  const [phongPower,setPhongPower]=useState(160), [phongInten,setPhongInten]=useState(1.6), [phongOpacity,setPhongOpacity]=useState(1.0);
-  const [bulletOpacity,setBulletOpacity]=useState(0.0), [roughness,setRoughness]=useState(0.25);
-  const [glassOpacity,setGlassOpacity]=useState(0.0), [glassStrength,setGlassStrength]=useState(0.8);
-  const [ior,setIor]=useState(1.52), [refractStrength,setRefractStrength]=useState(0.6);
-  const [fogAmount,setFogAmount]=useState(0.15), [shadowOpacity,setShadowOpacity]=useState(0.008);
-  const [causticInten,setCausticInten]=useState(1.1), [causticSpread,setCausticSpread]=useState(3.5);
-  const [colorTintStrength,setColorTintStrength]=useState(0.15), [softShadowRadius,setSoftShadowRadius]=useState(4.5);
-  const [fps,setFps]=useState(60);
+  const [phongPower, setPhongPower] = useState(160);
+  const [phongInten, setPhongInten] = useState(1.6);
+  const [phongOpacity, setPhongOpacity] = useState(1.0);
+  const [bulletOpacity, setBulletOpacity] = useState(0.0);
+  const [roughness, setRoughness] = useState(0.25);
+  const [glassOpacity, setGlassOpacity] = useState(0.0);
+  const [glassStrength, setGlassStrength] = useState(0.8);
+  const [ior, setIor] = useState(1.52);
+  const [refractStrength, setRefractStrength] = useState(0.6);
+  const [fogAmount, setFogAmount] = useState(0.15);
+  const [shadowOpacity, setShadowOpacity] = useState(0.003);
+  const [causticInten, setCausticInten] = useState(1.1);
+  const [causticSpread, setCausticSpread] = useState(3.5);
+  const [colorTintStrength, setColorTintStrength] = useState(0.15);
+  const [softShadowRadius, setSoftShadowRadius] = useState(4.5);
+  const [fps, setFps] = useState(60);
   
-  const [locks,setLocks]=useState({
-    rotX:false,rotY:false,rotZ:false,
-    phongPower:false,phongInten:false,phongOpacity:false,bulletOpacity:false,roughness:false,
-    glassOpacity:false,glassStrength:false,ior:false,refractStrength:false,
-    fogAmount:false,shadowOpacity:false,causticInten:false,causticSpread:false,
-    colorTintStrength:false,softShadowRadius:false
+  const [locks, setLocks] = useState({
+    rotX: false, rotY: false, rotZ: false,
+    phongPower: false, phongInten: false, phongOpacity: false,
+    bulletOpacity: false, roughness: false,
+    glassOpacity: false, glassStrength: false, ior: false, refractStrength: false,
+    fogAmount: false, shadowOpacity: false, causticInten: false, causticSpread: false,
+    colorTintStrength: false, softShadowRadius: false
   });
-  const toggleLock=k=>setLocks(p=>({...p,[k]:!p[k]}));
   
-  const handleColorChange=c=>{setColor(c); setDots(p=>updateAllDotsColor(p,c));};
+  const toggleLock = k => setLocks(p => ({...p, [k]: !p[k]}));
+  
+  const handleColorChange = c => {
+    setColor(c);
+    setDots(p => updateAllDotsColor(p, c));
+  };
   
   const activeLight = lights.find(l => l.id === activeLightId) || lights[0];
   
@@ -706,171 +829,303 @@ function App(){
     ));
   };
   
-  const canvasRef=useRef(null);
-  const cen=GRID/2, maxDepth=GRID;
-  const timeRef=useRef(0), frameCountRef=useRef(0), lastFpsRef=useRef(performance.now());
-
-  useEffect(()=>{
-    const canvas=canvasRef.current; if(!canvas) return;
-    const ctx=canvas.getContext('2d',{alpha:false});
-    const cx=CANVAS_SIZE/2, cy=CANVAS_SIZE/2;
-    let animId;
+  // ===== REFS for animation loop (prevents restarting effect) =====
+  const canvasRef = useRef(null);
+  const animRef = useRef(null);
+  const timeRef = useRef(0);
+  const frameCountRef = useRef(0);
+  const lastFpsRef = useRef(performance.now());
+  
+  // Keep all render params in refs so animation loop never restarts
+  const paramsRef = useRef({
+    dots, rotX, rotY, rotZ, lights, color,
+    phongPower, phongInten, phongOpacity,
+    bulletOpacity, roughness,
+    glassOpacity, glassStrength, ior, refractStrength,
+    fogAmount, shadowOpacity, causticInten, causticSpread,
+    colorTintStrength, softShadowRadius
+  });
+  
+  // Update refs whenever state changes
+  useEffect(() => {
+    paramsRef.current = {
+      dots, rotX, rotY, rotZ, lights, color,
+      phongPower, phongInten, phongOpacity,
+      bulletOpacity, roughness,
+      glassOpacity, glassStrength, ior, refractStrength,
+      fogAmount, shadowOpacity, causticInten, causticSpread,
+      colorTintStrength, softShadowRadius
+    };
+  });
+  
+  // SINGLE animation effect - runs once, reads from refs
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
     
-    const render=()=>{
-      const now=performance.now();
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) return;
+    
+    const cx = CANVAS_SIZE / 2;
+    const cy = CANVAS_SIZE / 2;
+    const cen = GRID / 2;
+    const maxDepth = GRID;
+    
+    const render = () => {
+      const now = performance.now();
       frameCountRef.current++;
-      if(now-lastFpsRef.current>=1000){
+      
+      if (now - lastFpsRef.current >= 1000) {
         setFps(frameCountRef.current);
-        frameCountRef.current=0;
-        lastFpsRef.current=now;
+        frameCountRef.current = 0;
+        lastFpsRef.current = now;
       }
-      timeRef.current+=16;
-      const time=timeRef.current;
       
-      ctx.fillStyle='#ffffff';
-      ctx.fillRect(0,0,CANVAS_SIZE,CANVAS_SIZE);
+      timeRef.current += 16;
+      const time = timeRef.current;
       
-      const list=[];
-      for(const [k,baseCol] of dots){
-        const [x,y,z]=k.split(',').map(Number);
-        const p=project(x,y,z,rotX,rotY,rotZ);
-        list.push({x,y,z,baseCol,px:p.x,py:p.y,pz:p.z,depth:p.z});
+      // Get latest params from refs
+      const p = paramsRef.current;
+      const enabledLights = p.lights.filter(l => l.enabled);
+      const causticBase = hexToRgb(p.color);
+      
+      // Clear canvas with solid white
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      
+      // Build and sort dot list
+      const list = [];
+      for (const [k, baseCol] of p.dots) {
+        const parts = k.split(',');
+        const x = parseInt(parts[0], 10);
+        const y = parseInt(parts[1], 10);
+        const z = parseInt(parts[2], 10);
+        const proj = project(x, y, z, p.rotX, p.rotY, p.rotZ);
+        list.push({
+          x, y, z, baseCol,
+          px: proj.x, py: proj.y, pz: proj.z,
+          depth: proj.z
+        });
       }
-      list.sort((a,b)=>a.depth-b.depth);
-      const causticBase=hexToRgb(color);
-      const enabledLights = lights.filter(l => l.enabled);
-
-      // Soft Drop Shadows from all enabled lights
+      list.sort((a, b) => a.depth - b.depth);
+      
+      // === SOFT DROP SHADOWS from all enabled lights ===
       for (const light of enabledLights) {
         const lightColor = hexToRgb(light.color);
-        for(const d of list){
-          const sp=projectShadow(d.x,d.y,d.z,light.x,light.y,light.z,GROUND_Y);
-          const pSp=project(sp.x,sp.y,sp.z,rotX,rotY,rotZ);
-          const distFade=clamp(1-(Math.hypot(d.x-cen,d.z-cen)/GRID),0.2,1);
-          const lHeight=clamp(light.z/LAYERS,0.25,1);
-          const baseAlpha=shadowOpacity*distFade*lHeight*light.intensity;
-          const sx=cx+pSp.x*SPACING, sy=cy+(pSp.y+18)*SPACING;
+        const li = safeNum(light.intensity, 1);
+        
+        for (const d of list) {
+          const sp = projectShadow(d.x, d.y, d.z, light.x, light.y, light.z, GROUND_Y);
+          if (!sp) continue; // Skip invalid projections
           
-          // Tint shadow slightly with light color for colored lights
-          const shadowR = lightColor.r < 255 || lightColor.g < 255 || lightColor.b < 255 
-            ? Math.round(lightColor.r * 0.15) : 0;
-          const shadowG = lightColor.g < 255 || lightColor.g < 255 || lightColor.b < 255 
-            ? Math.round(lightColor.g * 0.15) : 0;
-          const shadowB = lightColor.b < 255 || lightColor.g < 255 || lightColor.b < 255 
-            ? Math.round(lightColor.b * 0.15) : 0;
+          const pSp = project(sp.x, sp.y, sp.z, p.rotX, p.rotY, p.rotZ);
+          if (!isFinite(pSp.x) || !isFinite(pSp.y)) continue;
           
-          const outerGrad=ctx.createRadialGradient(sx,sy,0,sx,sy,softShadowRadius*SPACING);
-          outerGrad.addColorStop(0,`rgba(${shadowR},${shadowG},${shadowB},${baseAlpha*0.7})`);
-          outerGrad.addColorStop(0.5,`rgba(${shadowR},${shadowG},${shadowB},${baseAlpha*0.35})`);
-          outerGrad.addColorStop(1,`rgba(${shadowR},${shadowG},${shadowB},0)`);
-          ctx.beginPath(); ctx.arc(sx,sy,softShadowRadius*SPACING,0,Math.PI*2);
-          ctx.fillStyle=outerGrad; ctx.fill();
+          const distFade = clamp(1 - (Math.hypot(d.x - cen, d.z - cen) / GRID), 0.2, 1);
+          const lHeight = clamp(light.z / LAYERS, 0.25, 1);
+          const baseAlpha = p.shadowOpacity * distFade * lHeight * li;
           
-          const innerGrad=ctx.createRadialGradient(sx,sy,0,sx,sy,DOT_RADIUS*2.5);
-          innerGrad.addColorStop(0,`rgba(${shadowR},${shadowG},${shadowB},${baseAlpha})`);
-          innerGrad.addColorStop(1,`rgba(${shadowR},${shadowG},${shadowB},0)`);
-          ctx.beginPath(); ctx.arc(sx,sy,DOT_RADIUS*2.5,0,Math.PI*2);
-          ctx.fillStyle=innerGrad; ctx.fill();
+          if (baseAlpha <= 0) continue;
+          
+          const sx = cx + pSp.x * SPACING;
+          const sy = cy + (pSp.y + 18) * SPACING;
+          
+          if (!isFinite(sx) || !isFinite(sy)) continue;
+          
+          // Tint shadow slightly with light color
+          const isColored = lightColor.r < 250 || lightColor.g < 250 || lightColor.b < 250;
+          const shadowR = isColored ? Math.round(lightColor.r * 0.15) : 0;
+          const shadowG = isColored ? Math.round(lightColor.g * 0.15) : 0;
+          const shadowB = isColored ? Math.round(lightColor.b * 0.15) : 0;
+          
+          try {
+            const outerR = p.softShadowRadius * SPACING;
+            const outerGrad = ctx.createRadialGradient(sx, sy, 0, sx, sy, outerR);
+            outerGrad.addColorStop(0, `rgba(${shadowR},${shadowG},${shadowB},${baseAlpha * 0.7})`);
+            outerGrad.addColorStop(0.5, `rgba(${shadowR},${shadowG},${shadowB},${baseAlpha * 0.35})`);
+            outerGrad.addColorStop(1, `rgba(${shadowR},${shadowG},${shadowB},0)`);
+            ctx.beginPath();
+            ctx.arc(sx, sy, outerR, 0, Math.PI * 2);
+            ctx.fillStyle = outerGrad;
+            ctx.fill();
+            
+            const innerR = DOT_RADIUS * 2.5;
+            const innerGrad = ctx.createRadialGradient(sx, sy, 0, sx, sy, innerR);
+            innerGrad.addColorStop(0, `rgba(${shadowR},${shadowG},${shadowB},${baseAlpha})`);
+            innerGrad.addColorStop(1, `rgba(${shadowR},${shadowG},${shadowB},0)`);
+            ctx.beginPath();
+            ctx.arc(sx, sy, innerR, 0, Math.PI * 2);
+            ctx.fillStyle = innerGrad;
+            ctx.fill();
+          } catch (e) {
+            // Skip this shadow on any canvas error
+            continue;
+          }
         }
       }
-
-      // Caustic Glow from all enabled lights
-      if(glassOpacity>0.05||causticInten>0.05){
+      
+      // === CAUSTIC GLOW from all enabled lights ===
+      if (p.glassOpacity > 0.05 || p.causticInten > 0.05) {
         for (const light of enabledLights) {
           const lightColor = hexToRgb(light.color);
-          for(const d of list){
-            const sp=projectShadow(d.x,d.y,d.z,light.x,light.y,light.z,GROUND_Y);
-            const pSp=project(sp.x,sp.y,sp.z,rotX,rotY,rotZ);
-            const distFade=clamp(1-(Math.hypot(d.x-cen,d.z-cen)/GRID),0.2,1);
-            const curvatureFactor=getCurvatureFactor(d.x,d.y,d.z,cen);
-            const caust=causticPattern(sp.x,sp.z,light.x,light.y,light.z,time,causticInten*light.intensity,curvatureFactor);
+          const li = safeNum(light.intensity, 1);
+          
+          for (const d of list) {
+            const sp = projectShadow(d.x, d.y, d.z, light.x, light.y, light.z, GROUND_Y);
+            if (!sp) continue;
             
-            if(caust>0.03){
-              const brightMult=1.0+glassOpacity*3.5;
-              const alpha=caust*distFade*brightMult;
-              const colorAmount=colorTintStrength, whiteAmount=1-colorAmount;
-              // Blend caustic base color with light color
-              const blendedR = (causticBase.r + lightColor.r) / 2;
-              const blendedG = (causticBase.g + lightColor.g) / 2;
-              const blendedB = (causticBase.b + lightColor.b) / 2;
-              const r=Math.min(255,255*whiteAmount+blendedR*colorAmount);
-              const g=Math.min(255,255*whiteAmount+blendedG*colorAmount);
-              const b=Math.min(255,255*whiteAmount+blendedB*colorAmount);
-              const sx=cx+pSp.x*SPACING, sy=cy+(pSp.y+18)*SPACING;
+            const pSp = project(sp.x, sp.y, sp.z, p.rotX, p.rotY, p.rotZ);
+            if (!isFinite(pSp.x) || !isFinite(pSp.y)) continue;
+            
+            const distFade = clamp(1 - (Math.hypot(d.x - cen, d.z - cen) / GRID), 0.2, 1);
+            const curvatureFactor = getCurvatureFactor(d.x, d.y, d.z, cen);
+            const caust = causticPattern(
+              sp.x, sp.z, light.x, light.y, light.z, 
+              time, p.causticInten * li, curvatureFactor
+            );
+            
+            if (caust <= 0.03) continue;
+            
+            const brightMult = 1.0 + p.glassOpacity * 3.5;
+            const alpha = caust * distFade * brightMult;
+            const colorAmount = p.colorTintStrength;
+            const whiteAmount = 1 - colorAmount;
+            
+            const blendedR = (causticBase.r + lightColor.r) / 2;
+            const blendedG = (causticBase.g + lightColor.g) / 2;
+            const blendedB = (causticBase.b + lightColor.b) / 2;
+            
+            const r = Math.min(255, 255 * whiteAmount + blendedR * colorAmount);
+            const g = Math.min(255, 255 * whiteAmount + blendedG * colorAmount);
+            const b = Math.min(255, 255 * whiteAmount + blendedB * colorAmount);
+            
+            const sx = cx + pSp.x * SPACING;
+            const sy = cy + (pSp.y + 18) * SPACING;
+            
+            if (!isFinite(sx) || !isFinite(sy)) continue;
+            
+            try {
+              const outerR = p.causticSpread * SPACING;
+              const outerGlow = ctx.createRadialGradient(sx, sy, 0, sx, sy, outerR);
+              outerGlow.addColorStop(0, `rgba(${r},${g},${b},${Math.min(alpha * 0.5, 0.9)})`);
+              outerGlow.addColorStop(0.4, `rgba(${r},${g},${b},${Math.min(alpha * 0.25, 0.8)})`);
+              outerGlow.addColorStop(1, `rgba(${r},${g},${b},0)`);
+              ctx.beginPath();
+              ctx.arc(sx, sy, outerR, 0, Math.PI * 2);
+              ctx.fillStyle = outerGlow;
+              ctx.fill();
               
-              const outerGlow=ctx.createRadialGradient(sx,sy,0,sx,sy,causticSpread*SPACING);
-              outerGlow.addColorStop(0,`rgba(${r},${g},${b},${Math.min(alpha*0.5,0.9)})`);
-              outerGlow.addColorStop(0.4,`rgba(${r},${g},${b},${Math.min(alpha*0.25,0.8)})`);
-              outerGlow.addColorStop(1,`rgba(${r},${g},${b},0)`);
-              ctx.beginPath(); ctx.arc(sx,sy,causticSpread*SPACING,0,Math.PI*2);
-              ctx.fillStyle=outerGlow; ctx.fill();
-              
-              const coreGrad=ctx.createRadialGradient(sx,sy,0,sx,sy,DOT_RADIUS*(1.5+caust));
-              coreGrad.addColorStop(0,`rgba(${r},${g},${b},${Math.min(alpha,0.98)})`);
-              coreGrad.addColorStop(1,`rgba(${r},${g},${b},0)`);
-              ctx.beginPath(); ctx.arc(sx,sy,DOT_RADIUS*(1.5+caust),0,Math.PI*2);
-              ctx.fillStyle=coreGrad; ctx.fill();
+              const coreR = DOT_RADIUS * (1.5 + caust);
+              const coreGrad = ctx.createRadialGradient(sx, sy, 0, sx, sy, coreR);
+              coreGrad.addColorStop(0, `rgba(${r},${g},${b},${Math.min(alpha, 0.98)})`);
+              coreGrad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+              ctx.beginPath();
+              ctx.arc(sx, sy, coreR, 0, Math.PI * 2);
+              ctx.fillStyle = coreGrad;
+              ctx.fill();
+            } catch (e) {
+              continue;
             }
           }
         }
       }
-
-      // Main Letter Rendering with multi-light
-      for(const d of list){
-        const p=phongShadeMulti(d.x,d.y,d.z,lights,cen,cen,cen,d.baseCol,phongPower,phongInten);
-        const b=bulletShadeMulti(d.x,d.y,d.z,lights,cen,cen,cen,d.baseCol,roughness);
-        const g=glassShadeMulti(d.x,d.y,d.z,lights,cen,cen,cen,d.baseCol,glassStrength);
-        const refract=refractSeetruMulti(d.x,d.y,d.z,lights,cen,cen,cen,d.baseCol,ior,refractStrength);
-        
-        let rr=p.r*phongOpacity + b.r*bulletOpacity + g.r*glassOpacity + refract.r*glassOpacity;
-        let gg=p.g*phongOpacity + b.g*bulletOpacity + g.g*glassOpacity + refract.g*glassOpacity;
-        let bb=p.b*phongOpacity + b.b*bulletOpacity + g.b*glassOpacity + refract.b*glassOpacity;
-        
-        const depthFactor=(d.depth+maxDepth/2)/maxDepth;
-        const fogFactor=depthFactor*fogAmount;
-        rr=rr*(1-fogFactor)+FOG_COLOR.r*fogFactor;
-        gg=gg*(1-fogFactor)+FOG_COLOR.g*fogFactor;
-        bb=bb*(1-fogFactor)+FOG_COLOR.b*fogFactor;
-        
-        ctx.beginPath();
-        ctx.arc(cx+d.px*SPACING, cy+d.py*SPACING, DOT_RADIUS, 0, Math.PI*2);
-        ctx.fillStyle=`rgb(${clamp(rr,0,255)},${clamp(gg,0,255)},${clamp(bb,0,255)})`;
-        ctx.fill();
+      
+      // === MAIN LETTER RENDERING ===
+      for (const d of list) {
+        try {
+          const phong = phongShadeMulti(
+            d.x, d.y, d.z, p.lights, cen, cen, cen,
+            d.baseCol, p.phongPower, p.phongInten
+          );
+          const bullet = bulletShadeMulti(
+            d.x, d.y, d.z, p.lights, cen, cen, cen,
+            d.baseCol, p.roughness
+          );
+          const glass = glassShadeMulti(
+            d.x, d.y, d.z, p.lights, cen, cen, cen,
+            d.baseCol, p.glassStrength
+          );
+          const refract = refractSeetruMulti(
+            d.x, d.y, d.z, p.lights, cen, cen, cen,
+            d.baseCol, p.ior, p.refractStrength
+          );
+          
+          let rr = phong.r * p.phongOpacity + bullet.r * p.bulletOpacity + 
+                    glass.r * p.glassOpacity + refract.r * p.glassOpacity;
+          let gg = phong.g * p.phongOpacity + bullet.g * p.bulletOpacity + 
+                    glass.g * p.glassOpacity + refract.g * p.glassOpacity;
+          let bb = phong.b * p.phongOpacity + bullet.b * p.bulletOpacity + 
+                    glass.b * p.glassOpacity + refract.b * p.glassOpacity;
+          
+          // Fog
+          const depthFactor = (d.depth + maxDepth / 2) / maxDepth;
+          const fogFactor = depthFactor * p.fogAmount;
+          rr = rr * (1 - fogFactor) + FOG_COLOR.r * fogFactor;
+          gg = gg * (1 - fogFactor) + FOG_COLOR.g * fogFactor;
+          bb = bb * (1 - fogFactor) + FOG_COLOR.b * fogFactor;
+          
+          const drawX = cx + d.px * SPACING;
+          const drawY = cy + d.py * SPACING;
+          
+          if (!isFinite(drawX) || !isFinite(drawY)) continue;
+          
+          rr = clamp(Math.round(rr), 0, 255);
+          gg = clamp(Math.round(gg), 0, 255);
+          bb = clamp(Math.round(bb), 0, 255);
+          
+          ctx.beginPath();
+          ctx.arc(drawX, drawY, DOT_RADIUS, 0, Math.PI * 2);
+          ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
+          ctx.fill();
+        } catch (e) {
+          // Skip this dot on any error
+          continue;
+        }
       }
       
-      animId=requestAnimationFrame(render);
+      animRef.current = requestAnimationFrame(render);
     };
     
-    animId=requestAnimationFrame(render);
-    return ()=>cancelAnimationFrame(animId);
-  },[dots,rotX,rotY,rotZ,lights,phongPower,phongInten,phongOpacity,
-     bulletOpacity,roughness,glassOpacity,glassStrength,ior,refractStrength,
-     fogAmount,shadowOpacity,causticInten,causticSpread,colorTintStrength,
-     softShadowRadius,color,cen]);
-
+    animRef.current = requestAnimationFrame(render);
+    
+    return () => {
+      if (animRef.current) {
+        cancelAnimationFrame(animRef.current);
+        animRef.current = null;
+      }
+    };
+  }, []); // Empty deps - runs once, reads from refs
+  
   return (
     <>
       <div className="top-bar">
         <div className="palette-wrap">
           <div className="palette">
-            {MS_PAINT_COLORS.map(c=>(
-              <button key={c} 
-                className={"swatch "+(color===c?'selected':'')} 
-                style={{background:c}}
-                onClick={()=>handleColorChange(c)}
+            {MS_PAINT_COLORS.map(c => (
+              <button 
+                key={c} 
+                className={"swatch " + (color === c ? 'selected' : '')} 
+                style={{ background: c }}
+                onClick={() => handleColorChange(c)}
               />
             ))}
           </div>
         </div>
-        <div className="perf">⚡ {fps} FPS — ☀️ {lights.filter(l=>l.enabled).length}/{lights.length} Lights Active</div>
+        <div className="perf">
+          FPS: {fps} | Lights: {lights.filter(l => l.enabled).length}/{lights.length}
+        </div>
       </div>
 
       <div className="preview-box">
-        <h3>🔮 Voxel Letter A — Multi-Light System</h3>
-        <canvas ref={canvasRef} width={CANVAS_SIZE} height={CANVAS_SIZE}></canvas>
+        <h3>Voxel Letter A — Multi-Light System</h3>
+        <canvas 
+          ref={canvasRef} 
+          width={CANVAS_SIZE} 
+          height={CANVAS_SIZE}
+        />
 
         {/* Multi-Light Manager */}
-        <div className="section-header">💡 MULTI-LIGHT MANAGER</div>
+        <div className="section-header">MULTI-LIGHT MANAGER</div>
         <div className="light-manager">
           <div className="light-tabs">
             {lights.map(light => (
@@ -917,7 +1172,6 @@ function App(){
                   Editing: <strong>{activeLight.name}</strong>
                 </div>
                 
-                {/* Light Color */}
                 <div className="light-color-row">
                   <label>Light Color:</label>
                   <input 
@@ -937,14 +1191,11 @@ function App(){
                   </div>
                 </div>
                 
-                {/* Light Intensity */}
                 <div className="light-intensity-row">
                   <label>Intensity:</label>
                   <input 
                     type="range" 
-                    min="0" 
-                    max="2" 
-                    step="0.05" 
+                    min="0" max="2" step="0.05" 
                     value={activeLight.intensity}
                     onChange={(e) => updateActiveLight({ intensity: parseFloat(e.target.value) })}
                   />
@@ -953,177 +1204,192 @@ function App(){
                   </span>
                 </div>
                 
-                {/* Light Type */}
-                <div className="light-type-title" style={{ marginTop: 10 }}>Light Source Type:</div>
+                <div className="light-type-title" style={{ marginTop: 10 }}>
+                  Light Source Type:
+                </div>
                 <div className="light-option-row">
-                  <label className={`light-option ${activeLight.type==='point'?'active':''}`}>
-                    <input type="radio" 
-                      checked={activeLight.type==='point'}
-                      onChange={() => updateActiveLight({ type: 'point' })}/>
-                    ☀️ Point Light
+                  <label className={`light-option ${activeLight.type === 'point' ? 'active' : ''}`}>
+                    <input 
+                      type="radio" 
+                      checked={activeLight.type === 'point'}
+                      onChange={() => updateActiveLight({ type: 'point' })}
+                    />
+                    Point Light
                   </label>
-                  <label className={`light-option ${activeLight.type==='area'?'active':''}`}>
-                    <input type="radio" 
-                      checked={activeLight.type==='area'}
-                      onChange={() => updateActiveLight({ type: 'area' })}/>
-                    🟦 Area Light
+                  <label className={`light-option ${activeLight.type === 'area' ? 'active' : ''}`}>
+                    <input 
+                      type="radio" 
+                      checked={activeLight.type === 'area'}
+                      onChange={() => updateActiveLight({ type: 'area' })}
+                    />
+                    Area Light
                   </label>
-                  <label className={`light-option ${activeLight.type==='hemisphere'?'active':''}`}>
-                    <input type="radio" 
-                      checked={activeLight.type==='hemisphere'}
-                      onChange={() => updateActiveLight({ type: 'hemisphere' })}/>
-                    🌤️ Hemisphere
+                  <label className={`light-option ${activeLight.type === 'hemisphere' ? 'active' : ''}`}>
+                    <input 
+                      type="radio" 
+                      checked={activeLight.type === 'hemisphere'}
+                      onChange={() => updateActiveLight({ type: 'hemisphere' })}
+                    />
+                    Hemisphere
                   </label>
                 </div>
               </div>
               
-              {/* Light Position Controls */}
               <div className="controls">
-                <LockableSlider label={`${activeLight.name} X`}
+                <LockableSlider 
+                  label={`${activeLight.name} X`}
                   value={activeLight.x}
-                  onChange={e=>updateActiveLight({ x: +e.target.value })}
+                  onChange={e => updateActiveLight({ x: +e.target.value })}
                   min={0} max={GRID} step={1} locked={false}
-                  onToggleLock={()=>{}}/>
-                <LockableSlider label={`${activeLight.name} Y (Height)`}
+                  onToggleLock={() => {}}
+                />
+                <LockableSlider 
+                  label={`${activeLight.name} Y (Height)`}
                   value={activeLight.y}
-                  onChange={e=>updateActiveLight({ y: +e.target.value })}
+                  onChange={e => updateActiveLight({ y: +e.target.value })}
                   min={0} max={GRID} step={1} locked={false}
-                  onToggleLock={()=>{}}/>
-                <LockableSlider label={`${activeLight.name} Z (Depth)`}
+                  onToggleLock={() => {}}
+                />
+                <LockableSlider 
+                  label={`${activeLight.name} Z (Depth)`}
                   value={activeLight.z}
-                  onChange={e=>updateActiveLight({ z: +e.target.value })}
-                  min={0} max={LAYERS-1} step={1} locked={false}
-                  onToggleLock={()=>{}}/>
+                  onChange={e => updateActiveLight({ z: +e.target.value })}
+                  min={0} max={LAYERS - 1} step={1} locked={false}
+                  onToggleLock={() => {}}
+                />
               </div>
               
               <div className="multi-light-note">
-                💡 Tip: Use Key Light (main, warm/white) + Fill Light (softer, cool blue) + Rim Light (back, warm) for classic 3-point lighting.
-                Colored lights create dramatic tinted shadows and caustics.
+                Tip: Use Key Light (main, white) + Fill Light (softer, cool blue) + Rim Light (back, warm) 
+                for classic 3-point lighting. Colored lights create tinted shadows and caustics.
               </div>
             </>
           )}
         </div>
 
-        <div className="section-header">🌑 SHADOW & CAUSTIC</div>
+        <div className="section-header">SHADOW & CAUSTIC</div>
         <div className="controls">
           <LockableSlider label="Shadow Softness"
             value={softShadowRadius}
-            onChange={e=>setSoftShadowRadius(+e.target.value)}
+            onChange={e => setSoftShadowRadius(+e.target.value)}
             min={1} max={10} step={0.25} locked={locks.softShadowRadius}
-            onToggleLock={()=>toggleLock('softShadowRadius')}/>
+            onToggleLock={() => toggleLock('softShadowRadius')}
+          />
           <LockableSlider label="Shadow Opacity"
             value={shadowOpacity}
-            onChange={e=>setShadowOpacity(+e.target.value)}
+            onChange={e => setShadowOpacity(+e.target.value)}
             min={0.001} max={0.02} step={0.001} locked={locks.shadowOpacity}
-            onToggleLock={()=>toggleLock('shadowOpacity')}/>
+            onToggleLock={() => toggleLock('shadowOpacity')}
+          />
           <LockableSlider label="Caustic Intensity"
             value={causticInten}
-            onChange={e=>setCausticInten(+e.target.value)}
+            onChange={e => setCausticInten(+e.target.value)}
             min={0} max={2.5} step={0.05} locked={locks.causticInten}
-            onToggleLock={()=>toggleLock('causticInten')}/>
+            onToggleLock={() => toggleLock('causticInten')}
+          />
           <LockableSlider label="Caustic Spread"
             value={causticSpread}
-            onChange={e=>setCausticSpread(+e.target.value)}
+            onChange={e => setCausticSpread(+e.target.value)}
             min={1} max={12} step={0.25} locked={locks.causticSpread}
-            onToggleLock={()=>toggleLock('causticSpread')}/>
+            onToggleLock={() => toggleLock('causticSpread')}
+          />
           <LockableSlider label="Color Tint Strength"
             value={colorTintStrength}
-            onChange={e=>setColorTintStrength(+e.target.value)}
+            onChange={e => setColorTintStrength(+e.target.value)}
             min={0} max={0.5} step={0.01} locked={locks.colorTintStrength}
-            onToggleLock={()=>toggleLock('colorTintStrength')}/>
+            onToggleLock={() => toggleLock('colorTintStrength')}
+          />
         </div>
 
-        <div className="section-header">🔄 ROTATION</div>
+        <div className="section-header">ROTATION</div>
         <div className="controls">
           <LockableSlider label="Rotate X"
-            value={rotX}
-            onChange={e=>setRotX(+e.target.value)}
+            value={rotX} onChange={e => setRotX(+e.target.value)}
             min={0} max={360} step={1} locked={locks.rotX}
-            onToggleLock={()=>toggleLock('rotX')}/>
+            onToggleLock={() => toggleLock('rotX')}
+          />
           <LockableSlider label="Rotate Y"
-            value={rotY}
-            onChange={e=>setRotY(+e.target.value)}
+            value={rotY} onChange={e => setRotY(+e.target.value)}
             min={0} max={360} step={1} locked={locks.rotY}
-            onToggleLock={()=>toggleLock('rotY')}/>
+            onToggleLock={() => toggleLock('rotY')}
+          />
           <LockableSlider label="Rotate Z"
-            value={rotZ}
-            onChange={e=>setRotZ(+e.target.value)}
+            value={rotZ} onChange={e => setRotZ(+e.target.value)}
             min={0} max={360} step={1} locked={locks.rotZ}
-            onToggleLock={()=>toggleLock('rotZ')}/>
+            onToggleLock={() => toggleLock('rotZ')}
+          />
         </div>
 
-        <div className="section-header">✨ PHONG SPECULAR</div>
+        <div className="section-header">PHONG SPECULAR</div>
         <div className="controls">
           <LockableSlider label="Sharpness"
-            value={phongPower}
-            onChange={e=>setPhongPower(+e.target.value)}
+            value={phongPower} onChange={e => setPhongPower(+e.target.value)}
             min={40} max={300} step={1} locked={locks.phongPower}
-            onToggleLock={()=>toggleLock('phongPower')}/>
+            onToggleLock={() => toggleLock('phongPower')}
+          />
           <LockableSlider label="Brightness"
-            value={phongInten}
-            onChange={e=>setPhongInten(+e.target.value)}
+            value={phongInten} onChange={e => setPhongInten(+e.target.value)}
             min={0} max={3} step={0.1} locked={locks.phongInten}
-            onToggleLock={()=>toggleLock('phongInten')}/>
+            onToggleLock={() => toggleLock('phongInten')}
+          />
           <LockableSlider label="Opacity"
-            value={phongOpacity}
-            onChange={e=>setPhongOpacity(+e.target.value)}
+            value={phongOpacity} onChange={e => setPhongOpacity(+e.target.value)}
             min={0} max={1} step={0.05} locked={locks.phongOpacity}
-            onToggleLock={()=>toggleLock('phongOpacity')}/>
+            onToggleLock={() => toggleLock('phongOpacity')}
+          />
         </div>
 
-        <div className="section-header">🔩 METAL</div>
+        <div className="section-header">METAL</div>
         <div className="controls">
           <LockableSlider label="Opacity"
-            value={bulletOpacity}
-            onChange={e=>setBulletOpacity(+e.target.value)}
+            value={bulletOpacity} onChange={e => setBulletOpacity(+e.target.value)}
             min={0} max={1} step={0.05} locked={locks.bulletOpacity}
-            onToggleLock={()=>toggleLock('bulletOpacity')}/>
+            onToggleLock={() => toggleLock('bulletOpacity')}
+          />
           <LockableSlider label="Roughness"
-            value={roughness}
-            onChange={e=>setRoughness(+e.target.value)}
+            value={roughness} onChange={e => setRoughness(+e.target.value)}
             min={0} max={0.6} step={0.01} locked={locks.roughness}
-            onToggleLock={()=>toggleLock('roughness')}/>
+            onToggleLock={() => toggleLock('roughness')}
+          />
         </div>
 
-        <div className="section-header">🔍 GLASS / REFRACTION</div>
+        <div className="section-header">GLASS / REFRACTION</div>
         <div className="controls">
           <LockableSlider label="Glass Opacity"
-            value={glassOpacity}
-            onChange={e=>setGlassOpacity(+e.target.value)}
+            value={glassOpacity} onChange={e => setGlassOpacity(+e.target.value)}
             min={0} max={1} step={0.05} locked={locks.glassOpacity}
-            onToggleLock={()=>toggleLock('glassOpacity')}/>
+            onToggleLock={() => toggleLock('glassOpacity')}
+          />
           <LockableSlider label="Glass Strength"
-            value={glassStrength}
-            onChange={e=>setGlassStrength(+e.target.value)}
+            value={glassStrength} onChange={e => setGlassStrength(+e.target.value)}
             min={0} max={1.5} step={0.05} locked={locks.glassStrength}
-            onToggleLock={()=>toggleLock('glassStrength')}/>
+            onToggleLock={() => toggleLock('glassStrength')}
+          />
           <LockableSlider label="IOR (Refraction)"
-            value={ior}
-            onChange={e=>setIor(+e.target.value)}
+            value={ior} onChange={e => setIor(+e.target.value)}
             min={1.0} max={2.5} step={0.05} locked={locks.ior}
-            onToggleLock={()=>toggleLock('ior')}/>
+            onToggleLock={() => toggleLock('ior')}
+          />
           <LockableSlider label="Refract Strength"
-            value={refractStrength}
-            onChange={e=>setRefractStrength(+e.target.value)}
+            value={refractStrength} onChange={e => setRefractStrength(+e.target.value)}
             min={0} max={1.5} step={0.05} locked={locks.refractStrength}
-            onToggleLock={()=>toggleLock('refractStrength')}/>
+            onToggleLock={() => toggleLock('refractStrength')}
+          />
         </div>
 
-        <div className="section-header">🌫️ FOG</div>
+        <div className="section-header">FOG</div>
         <div className="controls">
           <LockableSlider label="Fog Density"
-            value={fogAmount}
-            onChange={e=>setFogAmount(+e.target.value)}
+            value={fogAmount} onChange={e => setFogAmount(+e.target.value)}
             min={0} max={1} step={0.05} locked={locks.fogAmount}
-            onToggleLock={()=>toggleLock('fogAmount')}/>
+            onToggleLock={() => toggleLock('fogAmount')}
+          />
         </div>
 
         <div className="note">
-          ✅ Multi-light system: up to 4 independent lights<br/>
-          ✅ Each light: position, type (Point/Area/Hemisphere), color, intensity, on/off<br/>
-          ✅ Shadows accumulate from all enabled lights<br/>
-          ✅ Caustics blend with each light's color<br/>
-          ✅ Classic 3-point lighting preset by default
+          Stability fixes applied: division-by-zero guards in shadow projection, 
+          NaN checks throughout, animation loop uses refs (no restarts on slider changes), 
+          try/catch around canvas drawing calls.
         </div>
       </div>
     </>
