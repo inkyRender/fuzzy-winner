@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>3D Voxel Letter A — Multi-Light Support (Stable)</title>
+<title>3D Voxel Letter A — Visible Voxel-Only Color Bleed</title>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -167,8 +167,6 @@ h3 { margin-bottom: 15px; color: #333; }
   border-color: #007bff;
 }
 .light-option input { cursor: pointer; }
-
-/* Multi-light styles */
 .light-manager {
   background: #f8f9fa;
   border-radius: 8px;
@@ -308,7 +306,7 @@ h3 { margin-bottom: 15px; color: #333; }
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useRef, useEffect, useCallback } = React;
+const { useState, useRef, useEffect } = React;
 
 const GRID = 64;
 const LAYERS = 64;
@@ -316,8 +314,6 @@ const DOT_RADIUS = 2.5;
 const SPACING = 3.5;
 const CANVAS_SIZE = 700;
 const FOG_COLOR = {r:255, g:255, b:255};
-const GROUND_Y = 25;
-const SPHERE_RADIUS = 18;
 const MAX_LIGHTS = 4;
 const EPSILON = 0.0001;
 
@@ -362,14 +358,6 @@ const createDefaultLights = () => [
   { id: 3, name: 'Rim Light', x: 10, y: 10, z: 55, type: 'point', color: '#ffebcc', intensity: 0.5, enabled: false }
 ];
 
-const getCurvatureFactor = (x, y, z, center) => {
-  const dx = x - center, dy = y - center, dz = z - center;
-  const distFromCenter = Math.sqrt(dx*dx + dy*dy + dz*dz);
-  const surfaceFactor = distFromCenter / SPHERE_RADIUS;
-  const curvature = 0.4 + Math.pow(surfaceFactor, 2.2) * 1.6;
-  return clamp(curvature, 0.3, 2.0);
-};
-
 const project = (x, y, z, rotX, rotY, rotZ) => {
   let px = x - GRID/2, py = y - GRID/2, pz = z - GRID/2;
   const rx = rotX * Math.PI / 180;
@@ -389,38 +377,6 @@ const project = (x, y, z, rotX, rotY, rotZ) => {
     y: safeNum(py - pz * 0.4), 
     z: safeNum(pz) 
   };
-};
-
-// SAFE version: guard against division by zero when light is at same height
-const projectShadow = (x, y, z, lx, ly, lz, groundY) => {
-  const dy = y - ly;
-  // If light is almost at same height as voxel, skip this shadow
-  if (Math.abs(dy) < EPSILON) return null;
-  const t = (groundY - ly) / dy;
-  // If t is extreme, skip
-  if (!isFinite(t) || Math.abs(t) > 1000) return null;
-  const sx = lx + (x - lx) * t;
-  const sz = lz + (z - lz) * t;
-  if (!isFinite(sx) || !isFinite(sz)) return null;
-  return { x: sx, y: groundY, z: sz };
-};
-
-const causticPattern = (sx, sz, lx, ly, lz, time, intensity, curvatureFactor) => {
-  const cen = GRID / 2;
-  const toLightLen = Math.hypot(lx - cen, lz - cen);
-  if (toLightLen < EPSILON) return 0;
-  const tlx = (lx - cen) / toLightLen;
-  const tlz = (lz - cen) / toLightLen;
-  const proj = (sx - cen) * tlx + (sz - cen) * tlz;
-  if (proj > 3) return 0;
-  const perpDist = Math.hypot((sx - cen) - proj * tlx, (sz - cen) - proj * tlz);
-  if (!isFinite(perpDist)) return 0;
-  const ring = Math.exp(-Math.pow((perpDist - 11 - Math.sin(time * 0.0005) * 1.5), 2) / 10);
-  const inner = Math.exp(-Math.pow((perpDist - 4), 2) / 4);
-  const depth = Math.exp(-proj * proj / 35);
-  const forward = proj < 0 ? Math.exp(proj * 0.12) : 0;
-  const result = (ring * 1.3 + inner * 0.5) * depth * forward * intensity * curvatureFactor;
-  return clamp(safeNum(result, 0), 0, 1);
 };
 
 const getStraightANormal = (px, py, pz, cx, cy, cz) => {
@@ -452,6 +408,8 @@ const getStraightANormal = (px, py, pz, cx, cy, cz) => {
   return normalize(n);
 };
 
+const getPlaneNormal = () => ({x: 0, y: 0, z: 1});
+
 const getLightDirection = (x, y, z, lx, ly, lz, type) => {
   if (type === 'hemisphere') return {x: 0, y: -1, z: 0};
   const dx = lx - x, dy = ly - y, dz = lz - z;
@@ -461,11 +419,13 @@ const getLightDirection = (x, y, z, lx, ly, lz, type) => {
 };
 
 const phongShadeMulti = (x, y, z, lights, cx, cy, cz, base, power, inten) => {
-  const n = getStraightANormal(x, y, z, cx, cy, cz);
+  const isPlane = z < cz - 10.5;
+  const n = isPlane ? getPlaneNormal() : getStraightANormal(x, y, z, cx, cy, cz);
   const v = normalize({x: cx - x, y: cy - y, z: 80 - z});
   const c = hexToRgb(base);
   
   const getEdgeFactor = (px, py, pz, cx, cy) => {
+    if (pz < cz - 10.5) return 0;
     const crossY = cy + 5;
     const d = Math.min(Math.abs(py - (cy - 20)), Math.abs(py - (cy + 20)), Math.abs(py - crossY));
     return Math.max(0, 1 - d / 6);
@@ -501,7 +461,7 @@ const phongShadeMulti = (x, y, z, lights, cx, cy, cz, base, power, inten) => {
       let spec = nDotH > 0.1 ? Math.pow(nDotH, power) : 0;
       
       const nDotV = Math.abs(dot(n, v));
-      const grazing = Math.pow(Math.max(0, 1 - nDotV), 3.5) * edge * 0.42;
+      const grazing = isPlane ? 0 : Math.pow(Math.max(0, 1 - nDotV), 3.5) * edge * 0.42;
       spec = Math.min(1.5, spec * edgeLift + grazing);
       
       const w = weight * li;
@@ -555,7 +515,8 @@ const phongShadeMulti = (x, y, z, lights, cx, cy, cz, base, power, inten) => {
 };
 
 const bulletShadeMulti = (x, y, z, lights, cx, cy, cz, base, rough) => {
-  const n = getStraightANormal(x, y, z, cx, cy, cz);
+  const isPlane = z < cz - 10.5;
+  const n = isPlane ? getPlaneNormal() : getStraightANormal(x, y, z, cx, cy, cz);
   const v = normalize({x: cx - x, y: cy - y, z: 80 - z});
   const c = hexToRgb(base);
   
@@ -593,7 +554,8 @@ const bulletShadeMulti = (x, y, z, lights, cx, cy, cz, base, rough) => {
 };
 
 const glassShadeMulti = (x, y, z, lights, cx, cy, cz, base, strength) => {
-  const n = getStraightANormal(x, y, z, cx, cy, cz);
+  const isPlane = z < cz - 10.5;
+  const n = isPlane ? getPlaneNormal() : getStraightANormal(x, y, z, cx, cy, cz);
   const v = normalize({x: cx - x, y: cy - y, z: 80 - z});
   const nDotV = Math.abs(dot(n, v));
   const fres = Math.pow(1 - Math.max(0, nDotV), 3.5);
@@ -628,7 +590,8 @@ const glassShadeMulti = (x, y, z, lights, cx, cy, cz, base, strength) => {
 };
 
 const refractSeetruMulti = (x, y, z, lights, cx, cy, cz, base, ior, strength) => {
-  const n = getStraightANormal(x, y, z, cx, cy, cz);
+  const isPlane = z < cz - 10.5;
+  const n = isPlane ? getPlaneNormal() : getStraightANormal(x, y, z, cx, cy, cz);
   const v = normalize({x: cx - x, y: cy - y, z: 80 - z});
   const c = hexToRgb(base);
   const depthFactor = Math.exp(-Math.hypot(x - cx, y - cy, z - cz) / 10);
@@ -706,10 +669,39 @@ const createLetterA = (c = '#00a2e8') => {
   return m;
 };
 
-const updateAllDotsColor = (dots, newColor) => {
+const createBackPlane = (darkness = 0.22) => {
+  const m = new Map();
+  const cen = GRID / 2;
+  const planeZ = cen - 11;
+  const size = 45;
+  
+  // Base plane color: gray scaled by darkness (0=white, 1=black)
+  const base = Math.round(255 * (1 - darkness));
+  const planeColor = `rgb(${base},${base},${base})`;
+  
+  for (let x = cen - size; x <= cen + size; x++) {
+    for (let y = cen - size; y <= cen + size; y++) {
+      m.set(key(x, y, planeZ), planeColor);
+    }
+  }
+  return m;
+};
+
+const updateAllDotsColor = (dots, newColor, planeDarkness = 0.22) => {
   const updated = new Map();
-  for (const [pos] of dots) {
-    updated.set(pos, newColor);
+  const cen = GRID / 2;
+  const planeZ = cen - 11;
+  const base = Math.round(255 * (1 - planeDarkness));
+  const planeColor = `rgb(${base},${base},${base})`;
+  
+  for (const [pos, col] of dots) {
+    const parts = pos.split(',');
+    const z = parseInt(parts[2], 10);
+    if (z === planeZ) {
+      updated.set(pos, planeColor);
+    } else {
+      updated.set(pos, newColor);
+    }
   }
   return updated;
 };
@@ -737,7 +729,13 @@ const LockableSlider = ({label, value, onChange, min, max, step, locked, onToggl
 );
 
 function App() {
-  const [dots, setDots] = useState(() => createLetterA('#00a2e8'));
+  const [planeDarkness, setPlaneDarkness] = useState(0.22);
+  
+  const [dots, setDots] = useState(() => {
+    const letter = createLetterA('#00a2e8');
+    const plane = createBackPlane(0.22);
+    return new Map([...plane, ...letter]);
+  });
   const [color, setColor] = useState('#00a2e8');
   const [rotX, setRotX] = useState(20);
   const [rotY, setRotY] = useState(45);
@@ -755,11 +753,12 @@ function App() {
   const [ior, setIor] = useState(1.52);
   const [refractStrength, setRefractStrength] = useState(0.6);
   const [fogAmount, setFogAmount] = useState(0.15);
-  const [shadowOpacity, setShadowOpacity] = useState(0.003);
-  const [causticInten, setCausticInten] = useState(1.1);
-  const [causticSpread, setCausticSpread] = useState(3.5);
-  const [colorTintStrength, setColorTintStrength] = useState(0.15);
-  const [softShadowRadius, setSoftShadowRadius] = useState(4.5);
+  
+  const [glowStrength, setGlowStrength] = useState(0.9);
+  const [glowRadius, setGlowRadius] = useState(20);
+  const [glowTint, setGlowTint] = useState(1.0);
+  const [glowSaturation, setGlowSaturation] = useState(1.4);
+  
   const [fps, setFps] = useState(60);
   
   const [locks, setLocks] = useState({
@@ -767,15 +766,20 @@ function App() {
     phongPower: false, phongInten: false, phongOpacity: false,
     bulletOpacity: false, roughness: false,
     glassOpacity: false, glassStrength: false, ior: false, refractStrength: false,
-    fogAmount: false, shadowOpacity: false, causticInten: false, causticSpread: false,
-    colorTintStrength: false, softShadowRadius: false
+    fogAmount: false, glowStrength: false, glowRadius: false, glowTint: false,
+    glowSaturation: false, planeDarkness: false
   });
   
   const toggleLock = k => setLocks(p => ({...p, [k]: !p[k]}));
   
   const handleColorChange = c => {
     setColor(c);
-    setDots(p => updateAllDotsColor(p, c));
+    setDots(p => updateAllDotsColor(p, c, planeDarkness));
+  };
+  
+  const handlePlaneDarknessChange = d => {
+    setPlaneDarkness(d);
+    setDots(p => updateAllDotsColor(p, color, d));
   };
   
   const activeLight = lights.find(l => l.id === activeLightId) || lights[0];
@@ -829,42 +833,58 @@ function App() {
     ));
   };
   
-  // ===== REFS for animation loop (prevents restarting effect) =====
   const canvasRef = useRef(null);
+  const glowCanvasRef = useRef(null);
+  const maskCanvasRef = useRef(null);
   const animRef = useRef(null);
   const timeRef = useRef(0);
   const frameCountRef = useRef(0);
   const lastFpsRef = useRef(performance.now());
   
-  // Keep all render params in refs so animation loop never restarts
   const paramsRef = useRef({
     dots, rotX, rotY, rotZ, lights, color,
     phongPower, phongInten, phongOpacity,
     bulletOpacity, roughness,
     glassOpacity, glassStrength, ior, refractStrength,
-    fogAmount, shadowOpacity, causticInten, causticSpread,
-    colorTintStrength, softShadowRadius
+    fogAmount, glowStrength, glowRadius, glowTint, glowSaturation
   });
   
-  // Update refs whenever state changes
   useEffect(() => {
     paramsRef.current = {
       dots, rotX, rotY, rotZ, lights, color,
       phongPower, phongInten, phongOpacity,
       bulletOpacity, roughness,
       glassOpacity, glassStrength, ior, refractStrength,
-      fogAmount, shadowOpacity, causticInten, causticSpread,
-      colorTintStrength, softShadowRadius
+      fogAmount, glowStrength, glowRadius, glowTint, glowSaturation
     };
   });
   
-  // SINGLE animation effect - runs once, reads from refs
+  // Boost color saturation for the glow
+  const saturateColor = (r, g, b, factor) => {
+    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    return {
+      r: clamp(Math.round(gray + (r - gray) * factor), 0, 255),
+      g: clamp(Math.round(gray + (g - gray) * factor), 0, 255),
+      b: clamp(Math.round(gray + (b - gray) * factor), 0, 255)
+    };
+  };
+  
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
+    
+    const glowCanvas = glowCanvasRef.current;
+    if (!glowCanvas) return;
+    const glowCtx = glowCanvas.getContext('2d', { alpha: true });
+    if (!glowCtx) return;
+    
+    const maskCanvas = maskCanvasRef.current;
+    if (!maskCanvas) return;
+    const maskCtx = maskCanvas.getContext('2d', { alpha: false });
+    if (!maskCtx) return;
     
     const cx = CANVAS_SIZE / 2;
     const cy = CANVAS_SIZE / 2;
@@ -882,156 +902,37 @@ function App() {
       }
       
       timeRef.current += 16;
-      const time = timeRef.current;
-      
-      // Get latest params from refs
       const p = paramsRef.current;
-      const enabledLights = p.lights.filter(l => l.enabled);
-      const causticBase = hexToRgb(p.color);
       
-      // Clear canvas with solid white
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
       
-      // Build and sort dot list
-      const list = [];
+      const planeList = [];
+      const letterList = [];
+      
       for (const [k, baseCol] of p.dots) {
         const parts = k.split(',');
         const x = parseInt(parts[0], 10);
         const y = parseInt(parts[1], 10);
         const z = parseInt(parts[2], 10);
         const proj = project(x, y, z, p.rotX, p.rotY, p.rotZ);
-        list.push({
+        const item = {
           x, y, z, baseCol,
           px: proj.x, py: proj.y, pz: proj.z,
           depth: proj.z
-        });
-      }
-      list.sort((a, b) => a.depth - b.depth);
-      
-      // === SOFT DROP SHADOWS from all enabled lights ===
-      for (const light of enabledLights) {
-        const lightColor = hexToRgb(light.color);
-        const li = safeNum(light.intensity, 1);
-        
-        for (const d of list) {
-          const sp = projectShadow(d.x, d.y, d.z, light.x, light.y, light.z, GROUND_Y);
-          if (!sp) continue; // Skip invalid projections
-          
-          const pSp = project(sp.x, sp.y, sp.z, p.rotX, p.rotY, p.rotZ);
-          if (!isFinite(pSp.x) || !isFinite(pSp.y)) continue;
-          
-          const distFade = clamp(1 - (Math.hypot(d.x - cen, d.z - cen) / GRID), 0.2, 1);
-          const lHeight = clamp(light.z / LAYERS, 0.25, 1);
-          const baseAlpha = p.shadowOpacity * distFade * lHeight * li;
-          
-          if (baseAlpha <= 0) continue;
-          
-          const sx = cx + pSp.x * SPACING;
-          const sy = cy + (pSp.y + 18) * SPACING;
-          
-          if (!isFinite(sx) || !isFinite(sy)) continue;
-          
-          // Tint shadow slightly with light color
-          const isColored = lightColor.r < 250 || lightColor.g < 250 || lightColor.b < 250;
-          const shadowR = isColored ? Math.round(lightColor.r * 0.15) : 0;
-          const shadowG = isColored ? Math.round(lightColor.g * 0.15) : 0;
-          const shadowB = isColored ? Math.round(lightColor.b * 0.15) : 0;
-          
-          try {
-            const outerR = p.softShadowRadius * SPACING;
-            const outerGrad = ctx.createRadialGradient(sx, sy, 0, sx, sy, outerR);
-            outerGrad.addColorStop(0, `rgba(${shadowR},${shadowG},${shadowB},${baseAlpha * 0.7})`);
-            outerGrad.addColorStop(0.5, `rgba(${shadowR},${shadowG},${shadowB},${baseAlpha * 0.35})`);
-            outerGrad.addColorStop(1, `rgba(${shadowR},${shadowG},${shadowB},0)`);
-            ctx.beginPath();
-            ctx.arc(sx, sy, outerR, 0, Math.PI * 2);
-            ctx.fillStyle = outerGrad;
-            ctx.fill();
-            
-            const innerR = DOT_RADIUS * 2.5;
-            const innerGrad = ctx.createRadialGradient(sx, sy, 0, sx, sy, innerR);
-            innerGrad.addColorStop(0, `rgba(${shadowR},${shadowG},${shadowB},${baseAlpha})`);
-            innerGrad.addColorStop(1, `rgba(${shadowR},${shadowG},${shadowB},0)`);
-            ctx.beginPath();
-            ctx.arc(sx, sy, innerR, 0, Math.PI * 2);
-            ctx.fillStyle = innerGrad;
-            ctx.fill();
-          } catch (e) {
-            // Skip this shadow on any canvas error
-            continue;
-          }
+        };
+        if (z < cen - 10.5) {
+          planeList.push(item);
+        } else {
+          letterList.push(item);
         }
       }
       
-      // === CAUSTIC GLOW from all enabled lights ===
-      if (p.glassOpacity > 0.05 || p.causticInten > 0.05) {
-        for (const light of enabledLights) {
-          const lightColor = hexToRgb(light.color);
-          const li = safeNum(light.intensity, 1);
-          
-          for (const d of list) {
-            const sp = projectShadow(d.x, d.y, d.z, light.x, light.y, light.z, GROUND_Y);
-            if (!sp) continue;
-            
-            const pSp = project(sp.x, sp.y, sp.z, p.rotX, p.rotY, p.rotZ);
-            if (!isFinite(pSp.x) || !isFinite(pSp.y)) continue;
-            
-            const distFade = clamp(1 - (Math.hypot(d.x - cen, d.z - cen) / GRID), 0.2, 1);
-            const curvatureFactor = getCurvatureFactor(d.x, d.y, d.z, cen);
-            const caust = causticPattern(
-              sp.x, sp.z, light.x, light.y, light.z, 
-              time, p.causticInten * li, curvatureFactor
-            );
-            
-            if (caust <= 0.03) continue;
-            
-            const brightMult = 1.0 + p.glassOpacity * 3.5;
-            const alpha = caust * distFade * brightMult;
-            const colorAmount = p.colorTintStrength;
-            const whiteAmount = 1 - colorAmount;
-            
-            const blendedR = (causticBase.r + lightColor.r) / 2;
-            const blendedG = (causticBase.g + lightColor.g) / 2;
-            const blendedB = (causticBase.b + lightColor.b) / 2;
-            
-            const r = Math.min(255, 255 * whiteAmount + blendedR * colorAmount);
-            const g = Math.min(255, 255 * whiteAmount + blendedG * colorAmount);
-            const b = Math.min(255, 255 * whiteAmount + blendedB * colorAmount);
-            
-            const sx = cx + pSp.x * SPACING;
-            const sy = cy + (pSp.y + 18) * SPACING;
-            
-            if (!isFinite(sx) || !isFinite(sy)) continue;
-            
-            try {
-              const outerR = p.causticSpread * SPACING;
-              const outerGlow = ctx.createRadialGradient(sx, sy, 0, sx, sy, outerR);
-              outerGlow.addColorStop(0, `rgba(${r},${g},${b},${Math.min(alpha * 0.5, 0.9)})`);
-              outerGlow.addColorStop(0.4, `rgba(${r},${g},${b},${Math.min(alpha * 0.25, 0.8)})`);
-              outerGlow.addColorStop(1, `rgba(${r},${g},${b},0)`);
-              ctx.beginPath();
-              ctx.arc(sx, sy, outerR, 0, Math.PI * 2);
-              ctx.fillStyle = outerGlow;
-              ctx.fill();
-              
-              const coreR = DOT_RADIUS * (1.5 + caust);
-              const coreGrad = ctx.createRadialGradient(sx, sy, 0, sx, sy, coreR);
-              coreGrad.addColorStop(0, `rgba(${r},${g},${b},${Math.min(alpha, 0.98)})`);
-              coreGrad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-              ctx.beginPath();
-              ctx.arc(sx, sy, coreR, 0, Math.PI * 2);
-              ctx.fillStyle = coreGrad;
-              ctx.fill();
-            } catch (e) {
-              continue;
-            }
-          }
-        }
-      }
+      planeList.sort((a, b) => a.depth - b.depth);
+      letterList.sort((a, b) => a.depth - b.depth);
       
-      // === MAIN LETTER RENDERING ===
-      for (const d of list) {
+      // === RENDER PLANE ===
+      for (const d of planeList) {
         try {
           const phong = phongShadeMulti(
             d.x, d.y, d.z, p.lights, cen, cen, cen,
@@ -1045,19 +946,11 @@ function App() {
             d.x, d.y, d.z, p.lights, cen, cen, cen,
             d.baseCol, p.glassStrength
           );
-          const refract = refractSeetruMulti(
-            d.x, d.y, d.z, p.lights, cen, cen, cen,
-            d.baseCol, p.ior, p.refractStrength
-          );
           
-          let rr = phong.r * p.phongOpacity + bullet.r * p.bulletOpacity + 
-                    glass.r * p.glassOpacity + refract.r * p.glassOpacity;
-          let gg = phong.g * p.phongOpacity + bullet.g * p.bulletOpacity + 
-                    glass.g * p.glassOpacity + refract.g * p.glassOpacity;
-          let bb = phong.b * p.phongOpacity + bullet.b * p.bulletOpacity + 
-                    glass.b * p.glassOpacity + refract.b * p.glassOpacity;
+          let rr = phong.r * p.phongOpacity + bullet.r * p.bulletOpacity + glass.r * p.glassOpacity;
+          let gg = phong.g * p.phongOpacity + bullet.g * p.bulletOpacity + glass.g * p.glassOpacity;
+          let bb = phong.b * p.phongOpacity + bullet.b * p.bulletOpacity + glass.b * p.glassOpacity;
           
-          // Fog
           const depthFactor = (d.depth + maxDepth / 2) / maxDepth;
           const fogFactor = depthFactor * p.fogAmount;
           rr = rr * (1 - fogFactor) + FOG_COLOR.r * fogFactor;
@@ -1078,7 +971,129 @@ function App() {
           ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
           ctx.fill();
         } catch (e) {
-          // Skip this dot on any error
+          continue;
+        }
+      }
+      
+      // === VOXEL-ONLY GLOW PIPELINE (ENHANCED VISIBILITY) ===
+      if (p.glowStrength > 0.01 && p.glowRadius > 0.5) {
+        // Step 1: Build voxel mask — white where voxels exist, black elsewhere
+        maskCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+        maskCtx.fillStyle = '#000000';
+        maskCtx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+        maskCtx.fillStyle = '#ffffff';
+        
+        const allVoxels = [...planeList, ...letterList];
+        for (const d of allVoxels) {
+          const drawX = cx + d.px * SPACING;
+          const drawY = cy + d.py * SPACING;
+          if (!isFinite(drawX) || !isFinite(drawY)) continue;
+          maskCtx.beginPath();
+          // Generous mask radius to catch blurred glow edges
+          maskCtx.arc(drawX, drawY, DOT_RADIUS * 3.0 + p.glowRadius * 0.5, 0, Math.PI * 2);
+          maskCtx.fill();
+        }
+        
+        // Step 2: Draw SUPER-BRIGHT letter glow source to glow canvas
+        glowCtx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+        const letterColor = hexToRgb(p.color);
+        
+        // Apply saturation boost + tint
+        let tintR = letterColor.r * p.glowTint + 255 * (1 - p.glowTint);
+        let tintG = letterColor.g * p.glowTint + 255 * (1 - p.glowTint);
+        let tintB = letterColor.b * p.glowTint + 255 * (1 - p.glowTint);
+        
+        // Saturate the glow color
+        const saturated = saturateColor(tintR, tintG, tintB, p.glowSaturation);
+        
+        // Draw glow source — multiple passes for brightness
+        for (let pass = 0; pass < 3; pass++) {
+          const sizeMult = 2.5 + pass * 0.8;
+          const alpha = 1.0 - pass * 0.25;
+          glowCtx.globalAlpha = alpha;
+          
+          for (const d of letterList) {
+            const drawX = cx + d.px * SPACING;
+            const drawY = cy + d.py * SPACING;
+            if (!isFinite(drawX) || !isFinite(drawY)) continue;
+            glowCtx.beginPath();
+            glowCtx.arc(drawX, drawY, DOT_RADIUS * sizeMult, 0, Math.PI * 2);
+            glowCtx.fillStyle = `rgb(${saturated.r},${saturated.g},${saturated.b})`;
+            glowCtx.fill();
+          }
+        }
+        glowCtx.globalAlpha = 1;
+        
+        // Step 3: Blur the glow (do it twice for extra softness)
+        glowCtx.save();
+        glowCtx.filter = `blur(${p.glowRadius}px)`;
+        glowCtx.drawImage(glowCanvas, 0, 0);
+        glowCtx.filter = `blur(${p.glowRadius * 0.5}px)`;
+        glowCtx.drawImage(glowCanvas, 0, 0);
+        glowCtx.restore();
+        
+        // Step 4: Apply mask — glow survives ONLY where voxels exist
+        glowCtx.save();
+        glowCtx.globalCompositeOperation = 'destination-in';
+        glowCtx.drawImage(maskCanvas, 0, 0);
+        glowCtx.restore();
+        
+        // Step 5: Composite masked glow onto main canvas
+        // 'lighter' = additive blend, works great on gray surfaces
+        ctx.save();
+        ctx.globalAlpha = p.glowStrength;
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.drawImage(glowCanvas, 0, 0);
+        ctx.restore();
+      }
+      
+      // === RENDER LETTER ON TOP ===
+      for (const d of letterList) {
+        try {
+          const phong = phongShadeMulti(
+            d.x, d.y, d.z, p.lights, cen, cen, cen,
+            d.baseCol, p.phongPower, p.phongInten
+          );
+          const bullet = bulletShadeMulti(
+            d.x, d.y, d.z, p.lights, cen, cen, cen,
+            d.baseCol, p.roughness
+          );
+          const glass = glassShadeMulti(
+            d.x, d.y, d.z, p.lights, cen, cen, cen,
+            d.baseCol, p.glassStrength
+          );
+          const refract = refractSeetruMulti(
+            d.x, d.y, d.z, p.lights, cen, cen, cen,
+            d.baseCol, p.ior, p.refractStrength
+          );
+          
+          let rr = phong.r * p.phongOpacity + bullet.r * p.bulletOpacity + 
+                   glass.r * p.glassOpacity + refract.r * p.glassOpacity;
+          let gg = phong.g * p.phongOpacity + bullet.g * p.bulletOpacity + 
+                   glass.g * p.glassOpacity + refract.g * p.glassOpacity;
+          let bb = phong.b * p.phongOpacity + bullet.b * p.bulletOpacity + 
+                   glass.b * p.glassOpacity + refract.b * p.glassOpacity;
+          
+          const depthFactor = (d.depth + maxDepth / 2) / maxDepth;
+          const fogFactor = depthFactor * p.fogAmount;
+          rr = rr * (1 - fogFactor) + FOG_COLOR.r * fogFactor;
+          gg = gg * (1 - fogFactor) + FOG_COLOR.g * fogFactor;
+          bb = bb * (1 - fogFactor) + FOG_COLOR.b * fogFactor;
+          
+          const drawX = cx + d.px * SPACING;
+          const drawY = cy + d.py * SPACING;
+          
+          if (!isFinite(drawX) || !isFinite(drawY)) continue;
+          
+          rr = clamp(Math.round(rr), 0, 255);
+          gg = clamp(Math.round(gg), 0, 255);
+          bb = clamp(Math.round(bb), 0, 255);
+          
+          ctx.beginPath();
+          ctx.arc(drawX, drawY, DOT_RADIUS, 0, Math.PI * 2);
+          ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
+          ctx.fill();
+        } catch (e) {
           continue;
         }
       }
@@ -1094,7 +1109,7 @@ function App() {
         animRef.current = null;
       }
     };
-  }, []); // Empty deps - runs once, reads from refs
+  }, []);
   
   return (
     <>
@@ -1117,14 +1132,68 @@ function App() {
       </div>
 
       <div className="preview-box">
-        <h3>Voxel Letter A — Multi-Light System</h3>
+        <h3>Voxel Letter A — Visible Voxel-Only Color Bleed</h3>
         <canvas 
           ref={canvasRef} 
           width={CANVAS_SIZE} 
           height={CANVAS_SIZE}
         />
+        <canvas 
+          ref={glowCanvasRef} 
+          width={CANVAS_SIZE} 
+          height={CANVAS_SIZE}
+          style={{ display: 'none' }}
+        />
+        <canvas 
+          ref={maskCanvasRef} 
+          width={CANVAS_SIZE} 
+          height={CANVAS_SIZE}
+          style={{ display: 'none' }}
+        />
 
-        {/* Multi-Light Manager */}
+        <div className="section-header">VOXEL-ONLY COLOR BLEED GLOW</div>
+        <div className="controls">
+          <LockableSlider label="Glow Strength"
+            value={glowStrength}
+            onChange={e => setGlowStrength(+e.target.value)}
+            min={0} max={1.5} step={0.01} locked={locks.glowStrength}
+            onToggleLock={() => toggleLock('glowStrength')}
+          />
+          <LockableSlider label="Glow Radius (Blur)"
+            value={glowRadius}
+            onChange={e => setGlowRadius(+e.target.value)}
+            min={0.5} max={40} step={0.5} locked={locks.glowRadius}
+            onToggleLock={() => toggleLock('glowRadius')}
+          />
+          <LockableSlider label="Glow Color Tint"
+            value={glowTint}
+            onChange={e => setGlowTint(+e.target.value)}
+            min={0} max={1} step={0.05} locked={locks.glowTint}
+            onToggleLock={() => toggleLock('glowTint')}
+          />
+          <LockableSlider label="Glow Saturation Boost"
+            value={glowSaturation}
+            onChange={e => setGlowSaturation(+e.target.value)}
+            min={0.5} max={2.5} step={0.05} locked={locks.glowSaturation}
+            onToggleLock={() => toggleLock('glowSaturation')}
+          />
+          <LockableSlider label="Plane Darkness (for visibility)"
+            value={planeDarkness}
+            onChange={e => handlePlaneDarknessChange(+e.target.value)}
+            min={0} max={0.6} step={0.01} locked={locks.planeDarkness}
+            onToggleLock={() => toggleLock('planeDarkness')}
+          />
+        </div>
+        <p className="note" style={{marginTop:10}}>
+          👁️ <strong>Now clearly visible:</strong> The back plane is light gray instead of pure white, so
+          the colored glow bleed shows up vividly. The glow is masked to voxels only — empty space stays clean.
+          <br/><br/>
+          <strong>Plane Darkness</strong> = darker plane = more visible glow (0 = white, 0.6 = dark gray)<br/>
+          <strong>Glow Saturation Boost</strong> = makes the glow color more intense/vivid<br/>
+          <strong>Glow Strength</strong> = how bright the bleed is<br/>
+          <strong>Glow Radius</strong> = how far color spreads across voxel surfaces
+        </p>
+
         <div className="section-header">MULTI-LIGHT MANAGER</div>
         <div className="light-manager">
           <div className="light-tabs">
@@ -1261,44 +1330,10 @@ function App() {
               
               <div className="multi-light-note">
                 Tip: Use Key Light (main, white) + Fill Light (softer, cool blue) + Rim Light (back, warm) 
-                for classic 3-point lighting. Colored lights create tinted shadows and caustics.
+                for classic 3-point lighting.
               </div>
             </>
           )}
-        </div>
-
-        <div className="section-header">SHADOW & CAUSTIC</div>
-        <div className="controls">
-          <LockableSlider label="Shadow Softness"
-            value={softShadowRadius}
-            onChange={e => setSoftShadowRadius(+e.target.value)}
-            min={1} max={10} step={0.25} locked={locks.softShadowRadius}
-            onToggleLock={() => toggleLock('softShadowRadius')}
-          />
-          <LockableSlider label="Shadow Opacity"
-            value={shadowOpacity}
-            onChange={e => setShadowOpacity(+e.target.value)}
-            min={0.001} max={0.02} step={0.001} locked={locks.shadowOpacity}
-            onToggleLock={() => toggleLock('shadowOpacity')}
-          />
-          <LockableSlider label="Caustic Intensity"
-            value={causticInten}
-            onChange={e => setCausticInten(+e.target.value)}
-            min={0} max={2.5} step={0.05} locked={locks.causticInten}
-            onToggleLock={() => toggleLock('causticInten')}
-          />
-          <LockableSlider label="Caustic Spread"
-            value={causticSpread}
-            onChange={e => setCausticSpread(+e.target.value)}
-            min={1} max={12} step={0.25} locked={locks.causticSpread}
-            onToggleLock={() => toggleLock('causticSpread')}
-          />
-          <LockableSlider label="Color Tint Strength"
-            value={colorTintStrength}
-            onChange={e => setColorTintStrength(+e.target.value)}
-            min={0} max={0.5} step={0.01} locked={locks.colorTintStrength}
-            onToggleLock={() => toggleLock('colorTintStrength')}
-          />
         </div>
 
         <div className="section-header">ROTATION</div>
@@ -1387,9 +1422,9 @@ function App() {
         </div>
 
         <div className="note">
-          Stability fixes applied: division-by-zero guards in shadow projection, 
-          NaN checks throughout, animation loop uses refs (no restarts on slider changes), 
-          try/catch around canvas drawing calls.
+          👁️ <strong>Visibility fix:</strong> The back plane is now light gray (adjustable) so additive glow
+          is visible against it. Glow uses 3-pass bright source drawing, double blur, saturation boost, and
+          'lighter' composite mode. All masked to voxel surfaces only.
         </div>
       </div>
     </>
