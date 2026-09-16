@@ -1,0 +1,2283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Metaballs Voxel Engine — GPU Median Blur — Colour</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#E2E4E7;font-family:sans-serif;padding:80px 10px 20px}
+.top-bar{position:fixed;top:0;left:0;right:0;background:white;padding:12px 15px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #ddd;flex-wrap:wrap;z-index:10;gap:12px}
+.preview-box{background:white;border-radius:12px;padding:15px;margin:0 auto;max-width:900px}
+canvas{display:block;margin:0 auto 20px;border-radius:8px;max-width:100%;height:auto}
+.env-manager{background:#f7f7f7;border:1px solid #e5e5e5;border-radius:8px;padding:10px;margin-bottom:10px}.env-manager input[type=file]{width:100%;font-size:12px}.env-status{font-size:11px;color:#666;margin-top:7px}
+.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.control-item{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.control-item label{font-weight:500;color:#333;display:flex;justify-content:space-between;align-items:center}
+.control-item input[type="range"]{width:100%;cursor:pointer}
+.control-item input[type="checkbox"]{width:16px;height:16px;cursor:pointer}
+.section-header{margin:20px 0 10px;font-weight:600;color:#555;font-size:12px;text-transform:uppercase;border-bottom:1px solid #eee;padding-bottom:4px}
+.palette-wrap{display:flex;align-items:center;gap:8px}
+.palette{display:grid;grid-template-columns:repeat(14,20px);gap:4px}
+.swatch{width:20px;height:20px;border-radius:4px;border:1px solid rgba(0,0,0,.25);cursor:pointer}
+.swatch.selected{outline:2px solid #000;outline-offset:1px}
+h3{margin-bottom:15px;color:#333}
+.light-manager{background:#f8f9fa;border-radius:8px;padding:12px;margin-bottom:12px}
+.light-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.light-tab{padding:6px 12px;border-radius:6px;background:#e9ecef;border:none;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:6px}
+.light-tab.active{background:#007bff;color:white}
+.light-dot{width:12px;height:12px;border-radius:50%;border:1px solid rgba(0,0,0,.2)}
+.remove-light{font-size:16px;line-height:1;margin-left:4px;opacity:.6}
+.add-light-btn{padding:6px 14px;background:#28a745;color:white;border:none;border-radius:6px;cursor:pointer;font-size:13px}
+.light-editor{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;padding-top:8px;border-top:1px solid #dee2e6}
+.color-input-wrap{display:flex;align-items:center;gap:8px}
+input[type="color"]{width:40px;height:32px;border:none;border-radius:4px;cursor:pointer;background:none}
+.metaball-toggle-bar{position:fixed;top:70px;right:15px;z-index:9}
+.metaball-toggle-btn{padding:8px 16px;background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;border-radius:8px;cursor:pointer;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.metaball-panel{position:fixed;top:60px;right:15px;width:380px;max-height:85vh;background:white;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.2);padding:16px;z-index:99;overflow-y:auto;display:none}
+.metaball-panel.open{display:block}
+.mb-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #eee}
+.mb-close{background:none;border:none;font-size:22px;cursor:pointer;color:#888;line-height:1}
+.mb-blob-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+.mb-blob-item{padding:10px 12px;background:#f5f5f5;border-radius:8px;border-left:3px solid #667eea;cursor:pointer}
+.mb-blob-item.selected{background:#eef2ff;border-left-color:#764ba2}
+.mb-blob-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.mb-remove-blob{background:none;border:none;color:#e53e3e;font-size:18px;cursor:pointer;padding:0 4px}
+.mb-add-blob{width:100%;padding:10px;background:#f0f4ff;border:2px dashed #667eea;border-radius:8px;cursor:pointer;color:#667eea;font-weight:500;margin-bottom:14px}
+.mb-threshold{background:#f8f9fa;padding:12px;border-radius:8px;margin-bottom:12px}
+.mb-preview-canvas{width:100%;height:180px;border-radius:8px;background:#f0f0f0;margin-bottom:12px}
+.mb-mode-toggle{display:flex;gap:6px;margin-bottom:12px}
+.mb-mode-btn{flex:1;padding:8px;border:1px solid #ddd;background:white;border-radius:6px;cursor:pointer;font-size:12px}
+.mb-mode-btn.active{background:#667eea;color:white;border-color:#667eea}
+
+/* Touch rotation */
+#mainCanvas{touch-action:none;cursor:grab;}
+#mainCanvas.dragging{cursor:grabbing;}
+.plane-manager{background:#f8f9fa;border-radius:8px;padding:12px;margin-bottom:12px}.plane-manager .controls{margin-top:8px}.touch-hint{font-size:12px;color:#666;text-align:center;margin:6px 0 10px;}
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+    <div class="palette-wrap"><div class="palette" id="mainPalette"></div></div>
+</div>
+
+<div class="metaball-toggle-bar">
+    <button class="metaball-toggle-btn" id="mbToggle">🫧 Metaballs Editor</button>
+</div>
+
+<div class="metaball-panel" id="mbPanel">
+    <div class="mb-header">
+        <h4 style="font-size:15px;color:#333;">🫧 Metaballs Editor</h4>
+        <button class="mb-close" id="mbClose">&times;</button>
+    </div>
+
+    <div class="mb-mode-toggle">
+        <button class="mb-mode-btn active" data-mode="sphere">Single Sphere</button>
+        <button class="mb-mode-btn" data-mode="metaball">Metaballs</button>
+    </div>
+
+    <canvas class="mb-preview-canvas" id="mbPreview"></canvas>
+
+    <div class="mb-threshold control-item">
+        <label>Blend Threshold: <span id="mbThreshVal">1.00</span></label>
+        <input type="range" id="mbThreshold" min="0.2" max="3" step="0.05" value="1">
+    </div>
+
+    <div class="section-header">Blobs</div>
+    <div class="mb-blob-list" id="mbBlobList"></div>
+    <button class="mb-add-blob" id="mbAddBlob">+ Add New Blob</button>
+
+    <div class="section-header">Selected Blob</div>
+    <div class="controls" id="mbBlobEditor" style="grid-template-columns:1fr 1fr;"></div>
+</div>
+
+<div class="preview-box">
+    <h3>🎨 Voxel Metaballs — GPU Median Blur ×4</h3>
+    <canvas id="mainCanvas" width="700" height="700"></canvas>
+
+    <div class="section-header">💡 Light Sources</div>
+    <div class="light-manager">
+        <div class="light-list" id="lightList"></div>
+        <button class="add-light-btn" id="addLightBtn">+ Add New Light</button>
+        <div class="light-editor" id="lightEditor"></div>
+    </div>
+
+
+    <div class="section-header">✨ Phong Specular (Base)</div>
+    <div class="controls">
+        <div class="control-item"><label>Enabled: <input type="checkbox" id="phongEnabled" checked></label></div>
+        <div class="control-item"><label>Sharpness: <span id="phongPowerVal">160</span></label><input type="range" id="phongPower" min="40" max="300" value="160"></div>
+        <div class="control-item"><label>Brightness: <span id="phongIntenVal">1.60</span></label><input type="range" id="phongInten" min="0" max="3" step=".05" value="1.6"></div>
+        <div class="control-item"><label>Opacity: <span id="phongOpacityVal">1.00</span></label><input type="range" id="phongOpacity" min="0" max="1" step=".05" value="1"></div>
+    </div>
+
+    <div class="section-header">🔩 Bullet / Realistic Metal</div>
+    <div class="controls">
+        <div class="control-item"><label>Enabled: <input type="checkbox" id="bulletEnabled"></label></div>
+        <div class="control-item"><label>Opacity: <span id="bulletOpacityVal">.50</span></label><input type="range" id="bulletOpacity" min="0" max="1" step=".05" value=".5"></div>
+        <div class="control-item"><label>Roughness: <span id="roughnessVal">.25</span></label><input type="range" id="roughness" min="0" max=".6" step=".01" value=".25"></div>
+    </div>
+
+    <div class="section-header">🔍 Glass / Fresnel — Photoreal</div>
+    <div class="controls">
+        <div class="control-item"><label>Enabled: <input type="checkbox" id="glassEnabled"></label></div>
+        <div class="control-item"><label>Opacity: <span id="glassOpacityVal">.60</span></label><input type="range" id="glassOpacity" min="0" max="1" step=".05" value=".6"></div>
+        <div class="control-item"><label>IOR / Refraction: <span id="glassIORVal">.70</span></label><input type="range" id="glassIOR" min=".2" max="1.2" step=".05" value=".7"></div>
+        <div class="control-item"><label>Reflection: <span id="glassReflectVal">1.00</span></label><input type="range" id="glassReflect" min="0" max="2" step=".05" value="1"></div>
+    </div>
+
+    <div class="section-header">🪙 Mercury — Liquid Metal</div>
+    <div class="controls">
+        <div class="control-item"><label>Enabled: <input type="checkbox" id="mercuryEnabled"></label></div>
+        <div class="control-item"><label>Opacity: <span id="mercuryOpacityVal">.85</span></label><input type="range" id="mercuryOpacity" min="0" max="1" step=".05" value=".85"></div>
+        <div class="control-item"><label>Polish: <span id="mercuryPolishVal">.80</span></label><input type="range" id="mercuryPolish" min="0" max="1" step=".05" value=".8"></div>
+        <div class="control-item"><label>Reflection: <span id="mercuryReflectVal">1.20</span></label><input type="range" id="mercuryReflect" min="0" max="2" step=".05" value="1.2"></div>
+    </div>
+
+    <div class="section-header">🧴 Plastic — Dielectric</div>
+    <div class="controls">
+        <div class="control-item"><label>Enabled: <input type="checkbox" id="plasticEnabled"></label></div>
+        <div class="control-item"><label>Opacity: <span id="plasticOpacityVal">.75</span></label><input type="range" id="plasticOpacity" min="0" max="1" step=".05" value=".75"></div>
+        <div class="control-item"><label>Gloss: <span id="plasticGlossVal">.65</span></label><input type="range" id="plasticGloss" min="0" max="1" step=".05" value=".65"></div>
+        <div class="control-item"><label>Specular: <span id="plasticSpecVal">.70</span></label><input type="range" id="plasticSpec" min="0" max="1.5" step=".05" value=".7"></div>
+    </div>
+
+    <div class="section-header">🌈 Scattering — Soft Subsurface</div>
+    <div class="controls">
+        <div class="control-item"><label>Enabled: <input type="checkbox" id="scatteringEnabled"></label></div>
+        <div class="control-item"><label>Opacity: <span id="scatteringOpacityVal">.55</span></label><input type="range" id="scatteringOpacity" min="0" max="1" step=".05" value=".55"></div>
+        <div class="control-item"><label>Strength: <span id="scatteringStrengthVal">.80</span></label><input type="range" id="scatteringStrength" min="0" max="2" step=".05" value=".8"></div>
+        <div class="control-item"><label>Radius: <span id="scatteringRadiusVal">.65</span></label><input type="range" id="scatteringRadius" min="0" max="1" step=".05" value=".65"></div>
+    </div>
+
+    <div class="section-header">🌐 HDRI / Environment Map</div>
+    <div class="env-manager">
+        <div class="control-item"><label>Environment Map</label><input type="file" id="envFile" accept=".hdr,.exr,image/*"></div>
+        <div class="controls">
+            <div class="control-item"><label>Enabled: <input type="checkbox" id="envEnabled" checked></label></div>
+            <div class="control-item"><label>Strength: <span id="envStrengthVal">1.00</span></label><input type="range" id="envStrength" min="0" max="3" step=".05" value="1"></div>
+            <div class="control-item"><label>Rotation: <span id="envRotationVal">0°</span></label><input type="range" id="envRotation" min="-180" max="180" step="1" value="0"></div>
+        </div>
+        <div id="envStatus" class="env-status">Built-in studio environment</div>
+    </div>
+
+    <div class="section-header">⬛ Shadow Plane / Caustics</div>
+    <div class="plane-manager">
+        <div class="controls">
+            <div class="control-item"><label>Plane Enabled: <input type="checkbox" id="planeEnabled" checked></label></div>
+            <div class="control-item"><label>Plane Brightness: <span id="planeBrightnessVal">.72</span></label><input type="range" id="planeBrightness" min="0" max="1" step=".01" value=".72"></div>
+            <div class="control-item"><label>Shadow Opacity: <span id="shadowOpacityVal">.10</span></label><input type="range" id="shadowOpacity" min=".001" max=".30" step=".001" value=".10"></div>
+            <div class="control-item"><label>Shadow Softness: <span id="shadowSoftnessVal">.55</span></label><input type="range" id="shadowSoftness" min=".05" max="1.5" step=".01" value=".55"></div>
+            <div class="control-item"><label>Caustics: <span id="causticStrengthVal">.35</span></label><input type="range" id="causticStrength" min="0" max="1.5" step=".01" value=".35"></div>
+            <div class="control-item"><label>Pixel Size: <span id="planePixelSizeVal">4</span></label><input type="range" id="planePixelSize" min="1" max="12" step="1" value="4"></div>
+        </div>
+    </div>
+
+    <div class="section-header">🌫️ Fog</div>
+    <div class="controls">
+        <div class="control-item"><label>Fog Density: <span id="fogAmountVal">.35</span></label><input type="range" id="fogAmount" min="0" max="1" step=".05" value=".35"></div>
+    </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+const GRID=64,LAYERS=64,SPACING=3.5,CANVAS_SIZE=700;
+const CEN=GRID/2,MAX_BLOBS=32,MAX_LIGHTS=16,MEDIAN_PASSES=4;
+
+const MS_PAINT_COLORS=[
+"#000000","#7f7f7f","#880015","#ed1c24","#ff7f27","#fff200","#22b14c",
+"#00a2e8","#3f48cc","#a349a4","#ffffff","#c3c3c3","#b97a57","#ffaec9"
+];
+
+const colorCache=new Map();
+
+function hexToRgb(h){
+    let c=colorCache.get(h);
+    if(c)return c;
+    const s=h.replace("#","");
+    c={r:parseInt(s.slice(0,2),16)||0,g:parseInt(s.slice(2,4),16)||0,b:parseInt(s.slice(4,6),16)||0};
+    colorCache.set(h,c);
+    return c;
+}
+
+let state={
+    color:"#00a2e8",
+    rotX:20,rotY:45,rotZ:0,
+    phongEnabled:true,phongPower:160,phongInten:1.6,phongOpacity:1,
+    bulletEnabled:false,bulletOpacity:.5,roughness:.25,
+    glassEnabled:false,glassOpacity:.6,glassIOR:.7,glassReflect:1,
+    mercuryEnabled:false,mercuryOpacity:.85,mercuryPolish:.8,mercuryReflect:1.2,
+    plasticEnabled:false,plasticOpacity:.75,plasticGloss:.65,plasticSpec:.7,
+    scatteringEnabled:false,scatteringOpacity:.55,scatteringStrength:.8,scatteringRadius:.65,
+    envEnabled:true,envStrength:1,envRotation:0,
+    planeEnabled:true,planeBrightness:.72,shadowOpacity:.10,shadowSoftness:.55,causticStrength:.35,planePixelSize:4,
+    fogAmount:.35
+};
+
+let mbMode="sphere",blobs=[],selectedBlobIndex=0,blobCounter=0,metaballThreshold=1;
+let lights=[],selectedLightIndex=0,lightCounter=0;
+
+const canvas=document.getElementById("mainCanvas");
+const gl=canvas.getContext("webgl2",{alpha:true,antialias:false,premultipliedAlpha:false});
+
+if(!gl){
+    document.body.innerHTML="<h2>WebGL2 is required for this renderer.</h2>";
+    return;
+}
+
+const VS=`#version 300 es
+precision highp float;
+precision highp int;
+#define MAX_BLOBS ${MAX_BLOBS}
+
+layout(location=0) in vec3 aVoxel;
+
+uniform int uBlobCount;
+uniform int uMode;
+uniform float uThreshold;
+uniform vec3 uBlobPos[MAX_BLOBS];
+uniform float uBlobRadius[MAX_BLOBS];
+uniform vec3 uBlobColor[MAX_BLOBS];
+uniform vec3 uRotation;
+uniform float uScale;
+
+out vec3 vColor;
+out vec3 vNormal;
+out float vDepth;
+out float vVisible;
+
+vec3 rotateVec(vec3 v){
+    float rx=radians(uRotation.x),ry=radians(uRotation.y),rz=radians(uRotation.z);
+    float cx=cos(rx),sx=sin(rx),cy=cos(ry),sy=sin(ry),cz=cos(rz),sz=sin(rz);
+    vec3 q=v;
+    q=vec3(q.x,q.y*cx-q.z*sx,q.y*sx+q.z*cx);
+    q=vec3(q.x*cy+q.z*sy,q.y,-q.x*sy+q.z*cy);
+    q=vec3(q.x*cz-q.y*sz,q.x*sz+q.y*cz,q.z);
+    return q;
+}
+
+float fieldAt(vec3 p){
+    float f=0.0;
+    for(int i=0;i<MAX_BLOBS;i++){
+        if(i>=uBlobCount)break;
+        vec3 d=p-uBlobPos[i];
+        float r2=max(dot(d,d),0.000001);
+        float rr=uBlobRadius[i]*uBlobRadius[i];
+        f+=rr/r2;
+    }
+    return f;
+}
+
+vec3 fieldNormal(vec3 p){
+    vec3 g=vec3(0.0);
+    for(int i=0;i<MAX_BLOBS;i++){
+        if(i>=uBlobCount)break;
+        vec3 d=p-uBlobPos[i];
+        float r2=max(dot(d,d),0.000001);
+        float rr=uBlobRadius[i]*uBlobRadius[i];
+        g+=2.0*rr*d/(r2*r2);
+    }
+    float l=length(g);
+    return l>0.000001?g/l:vec3(0.0,0.0,1.0);
+}
+
+vec3 getColor(vec3 p){
+    if(uBlobCount<=0)return vec3(1.0);
+    if(uMode==0 && uBlobCount==1)return uBlobColor[0];
+
+    vec3 result=vec3(0.0);
+    float total=0.0;
+
+    for(int i=0;i<MAX_BLOBS;i++){
+        if(i>=uBlobCount)break;
+        vec3 d=p-uBlobPos[i];
+        float r2=max(dot(d,d),0.000001);
+        float w=(uBlobRadius[i]*uBlobRadius[i])/r2;
+        result+=uBlobColor[i]*w;
+        total+=w;
+    }
+    return result/max(total,0.000001);
+}
+
+void main(){
+    vec3 p=aVoxel;
+    float field;
+
+    if(uMode==0 && uBlobCount==1){
+        vec3 d=p-uBlobPos[0];
+        field=dot(d,d)<=uBlobRadius[0]*uBlobRadius[0]?uThreshold:0.0;
+    }else{
+        field=fieldAt(p);
+    }
+
+    if(field<uThreshold){
+        vVisible=0.0;
+        gl_Position=vec4(2.0,2.0,2.0,1.0);
+        gl_PointSize=0.0;
+        return;
+    }
+
+    vec3 n;
+    if(uMode==0 && uBlobCount==1)n=normalize(p-uBlobPos[0]);
+    else n=fieldNormal(p);
+
+    vec3 r=rotateVec(p-vec3(32.0));
+    n=normalize(rotateVec(n));
+
+    float py=r.y-r.z*.4;
+
+    gl_Position=vec4(r.x*uScale,py*uScale,-r.z/64.0,1.0);
+    gl_PointSize=5.0;
+
+    vColor=getColor(p);
+    vNormal=n;
+    vDepth=r.z;
+    vVisible=1.0;
+}`;
+
+const FS=`#version 300 es
+precision highp float;
+precision highp int;
+#define MAX_LIGHTS ${MAX_LIGHTS}
+
+in vec3 vColor;
+in vec3 vNormal;
+in float vDepth;
+in float vVisible;
+
+uniform int uLightCount;
+uniform vec3 uLightDir[MAX_LIGHTS];
+uniform vec3 uLightColor[MAX_LIGHTS];
+uniform float uLightIntensity[MAX_LIGHTS];
+
+uniform int uPhongEnabled;
+uniform float uPhongPower;
+uniform float uPhongInten;
+uniform float uPhongOpacity;
+
+uniform int uBulletEnabled;
+uniform float uBulletOpacity;
+uniform float uRoughness;
+
+uniform int uGlassEnabled;
+uniform float uGlassOpacity;
+uniform float uGlassIOR;
+uniform float uGlassReflect;
+
+uniform int uMercuryEnabled;
+uniform float uMercuryOpacity;
+uniform float uMercuryPolish;
+uniform float uMercuryReflect;
+
+uniform int uPlasticEnabled;
+uniform float uPlasticOpacity;
+uniform float uPlasticGloss;
+uniform float uPlasticSpec;
+
+uniform int uScatteringEnabled;
+uniform float uScatteringOpacity;
+uniform float uScatteringStrength;
+uniform float uScatteringRadius;
+
+uniform sampler2D uEnvironment;
+uniform int uEnvEnabled;
+uniform float uEnvStrength;
+uniform float uEnvRotation;
+uniform float uFogAmount;
+
+out vec4 outColor;
+
+const float PI=3.14159265359;
+
+float sat(float x){return clamp(x,0.0,1.0);}
+vec3 sn(vec3 v){float l=length(v);return l>0.000001?v/l:vec3(0.0,0.0,1.0);}
+vec3 fresnel(vec3 F0,float c){float f=pow(1.0-sat(c),5.0);return F0+(1.0-F0)*f;}
+
+vec3 environment(vec3 dir,float rough){
+    vec3 r=sn(dir);
+    float yaw=radians(uEnvRotation);
+    float c=cos(yaw),s=sin(yaw);
+    r=vec3(c*r.x-s*r.z,r.y,s*r.x+c*r.z);
+
+    if(uEnvEnabled>0){
+        float phi=atan(r.z,r.x);
+        float theta=acos(clamp(r.y,-1.0,1.0));
+        vec2 uv=vec2(fract(phi/(2.0*PI)+.5),theta/PI);
+        vec3 e=texture(uEnvironment,uv).rgb;
+        /* Approximate rough reflections without expensive mip chains. */
+        float soften=rough*.42;
+        e=mix(e,vec3(.72,.76,.82),soften);
+        return e*uEnvStrength;
+    }
+
+    float top=sat(r.y*.5+.5);
+    vec3 sky=mix(vec3(.20,.24,.30),vec3(.92,.95,.98),top);
+    vec3 band=vec3(.98)*pow(sat(1.0-abs(r.x)),4.0);
+    vec3 floorC=vec3(.20,.23,.27)*(1.0-top);
+    vec3 e=sky*.72+band*.50+floorC*.35;
+    return mix(e,vec3(.70,.74,.80),rough*.18);
+}
+
+vec3 phongShade(vec3 n,vec3 l,vec3 v,vec3 base,vec3 lc,float I){
+    float ndl=sat(dot(n,l)), ndv=sat(dot(n,v));
+    vec3 h=sn(l+v);
+    float ndh=sat(dot(n,h));
+    vec3 diff=base*lc*(.08+.92*ndl)*I;
+    float spec=pow(ndh,max(4.0,uPhongPower));
+    vec3 hi=vec3(1.0)*spec*uPhongInten*(.55+.45*pow(1.0-ndv,5.0));
+    return diff+hi;
+}
+
+vec3 metalShade(vec3 n,vec3 l,vec3 v,vec3 base,vec3 lc,float I){
+    float rough=clamp(uRoughness,.015,.6);
+    float ndl=sat(dot(n,l)),ndv=sat(dot(n,v));
+    vec3 h=sn(l+v); float ndh=sat(dot(n,h));
+    float exponent=mix(360.0,16.0,rough);
+    float spec=pow(ndh,exponent);
+    vec3 F0=clamp(base*.86+.10,vec3(.06),vec3(.98));
+    vec3 F=fresnel(F0,ndv);
+    vec3 direct=base*lc*ndl*I*(.10+.55*rough);
+    vec3 hi=lc*F*spec*I*2.2;
+    vec3 env=environment(reflect(-v,n),rough)*mix(vec3(.72,.76,.82),base*.7+.3,.48);
+    return direct+hi+env*(.30+.70*pow(1.0-ndv,1.7));
+}
+
+vec3 mercuryShade(vec3 n,vec3 l,vec3 v,vec3 base,vec3 lc,float I){
+    float polish=clamp(uMercuryPolish,0.0,1.0);
+    float ndl=sat(dot(n,l)),ndv=sat(dot(n,v));
+    vec3 h=sn(l+v);float ndh=sat(dot(n,h));
+    float exponent=mix(22.0,520.0,polish);
+    float spec=pow(ndh,exponent);
+    vec3 F0=vec3(.86,.88,.90);
+    vec3 F=fresnel(F0,ndv);
+    vec3 env=environment(reflect(-v,n),mix(.38,.02,polish));
+    vec3 reflection=env*F*uMercuryReflect*(.85+.55*polish);
+    vec3 highlight=lc*vec3(.98,.99,1.0)*spec*I*(2.0+3.0*polish);
+    vec3 body=base*lc*ndl*I*.10;
+    float rim=pow(1.0-ndv,3.0);
+    return body+reflection+highlight+vec3(.72,.78,.84)*rim*.42*uMercuryReflect;
+}
+
+vec3 glassShade(vec3 n,vec3 l,vec3 v,vec3 base,vec3 lc,float I){
+    float ndv=sat(dot(n,v)),ndl=sat(dot(n,l));
+    float opticalIOR=1.20+clamp(uGlassIOR,.2,1.2)*.42;
+    float r0=pow((opticalIOR-1.0)/(opticalIOR+1.0),2.0);
+    vec3 F=fresnel(vec3(r0),ndv);
+    vec3 h=sn(l+v);float ndh=sat(dot(n,h));
+    float spec=pow(ndh,220.0);
+    float through=(.20+.80*ndl)*(1.0-sat(F.r))*(.30+.70*ndv);
+    vec3 transmission=base*lc*through*I;
+    vec3 reflection=environment(reflect(-v,n),.05)*F*uGlassReflect*1.35;
+    vec3 hi=vec3(1.0)*spec*(.55+.45*I)*uGlassReflect;
+    vec3 edge=vec3(.72,.88,1.0)*pow(1.0-ndv,3.0)*.38*uGlassReflect;
+    return transmission+reflection+hi+edge;
+}
+
+vec3 plasticShade(vec3 n,vec3 l,vec3 v,vec3 base,vec3 lc,float I){
+    float gloss=clamp(uPlasticGloss,0.0,1.0);
+    float ndl=sat(dot(n,l)),ndv=sat(dot(n,v));
+    vec3 h=sn(l+v);float ndh=sat(dot(n,h));
+    float exponent=mix(10.0,180.0,gloss);
+    float spec=pow(ndh,exponent);
+    vec3 F0=vec3(.035);
+    vec3 F=fresnel(F0,ndv);
+    vec3 diff=base*lc*(.16+.84*ndl)*I;
+    vec3 hi=lc*F*spec*uPlasticSpec*(.65+I*.35);
+    vec3 env=environment(reflect(-v,n),1.0-gloss)*F*(.22+.48*gloss);
+    return diff+hi+env;
+}
+
+vec3 scatteringShade(vec3 n,vec3 l,vec3 v,vec3 base,vec3 lc,float I){
+    float ndl=sat(dot(n,l)),ndv=sat(dot(n,v));
+    float back=sat(dot(-n,l));
+    float forward=sat(dot(n,l));
+    float rim=pow(1.0-ndv,1.5);
+    float radius=clamp(uScatteringRadius,0.0,1.0);
+    float scatter=(back*(.35+.65*radius)+pow(1.0-forward,2.0)*radius*.65+rim*.45)*uScatteringStrength;
+    vec3 warm=base*lc*scatter*I;
+    vec3 wrap=base*lc*(.10+.30*sat((ndl+radius*.7)/(1.0+radius*.7)))*I;
+    return warm+wrap;
+}
+
+void main(){
+    if(vVisible<.5)discard;
+    vec2 q=gl_PointCoord*2.0-1.0;
+    float rr=dot(q,q);
+    if(rr>1.0)discard;
+
+    vec3 n=sn(vNormal);
+    vec3 v=vec3(0.0,0.0,1.0);
+    vec3 total=vColor*.12;
+    int layers=(uPhongEnabled>0?1:0)+(uBulletEnabled>0?1:0)+(uGlassEnabled>0?1:0)+
+               (uMercuryEnabled>0?1:0)+(uPlasticEnabled>0?1:0)+(uScatteringEnabled>0?1:0);
+
+    if(uLightCount>0 && layers>0){
+        vec3 accum=vec3(0.0);
+        for(int i=0;i<MAX_LIGHTS;i++){
+            if(i>=uLightCount)break;
+            vec3 l=sn(uLightDir[i]);
+            vec3 lc=uLightColor[i];
+            float I=uLightIntensity[i];
+
+            if(uPhongEnabled>0)accum+=phongShade(n,l,v,vColor,lc,I)*uPhongOpacity;
+            if(uBulletEnabled>0)accum+=metalShade(n,l,v,vColor,lc,I)*uBulletOpacity;
+            if(uGlassEnabled>0)accum+=glassShade(n,l,v,vColor,lc,I)*uGlassOpacity;
+            if(uMercuryEnabled>0)accum+=mercuryShade(n,l,v,vColor,lc,I)*uMercuryOpacity;
+            if(uPlasticEnabled>0)accum+=plasticShade(n,l,v,vColor,lc,I)*uPlasticOpacity;
+            if(uScatteringEnabled>0)accum+=scatteringShade(n,l,v,vColor,lc,I)*uScatteringOpacity;
+        }
+        total+=accum/max(1.0,float(uLightCount*layers));
+    }
+
+    total+=vColor*(.07+.055*sat(n.y*.5+.5));
+
+    float fog=clamp(1.0-(vDepth/64.0)*uFogAmount,1.0-uFogAmount,1.0);
+    total*=fog;
+
+    float edge=smoothstep(.05,.95,1.0-rr);
+    total*=mix(.82,1.08,edge);
+    total=clamp(total,0.0,1.0);
+
+    float alpha=1.0-smoothstep(.88,1.0,rr);
+    outColor=vec4(total,alpha);
+}`;
+
+
+function compile(type,src){
+    const sh=gl.createShader(type);
+    gl.shaderSource(sh,src);
+    gl.compileShader(sh);
+    if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS))
+        throw new Error(gl.getShaderInfoLog(sh)||"Shader compile error");
+    return sh;
+}
+
+function createProgram(vs,fs){
+    const p=gl.createProgram();
+    gl.attachShader(p,compile(gl.VERTEX_SHADER,vs));
+    gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs));
+    gl.linkProgram(p);
+    if(!gl.getProgramParameter(p,gl.LINK_STATUS))
+        throw new Error(gl.getProgramInfoLog(p)||"GPU link error");
+    return p;
+}
+
+const program=createProgram(VS,FS);
+gl.useProgram(program);
+
+/* Static GPU voxel buffer */
+const voxelData=new Float32Array(GRID*GRID*LAYERS*3);
+let vi=0;
+
+for(let x=0;x<GRID;x++)
+    for(let y=0;y<GRID;y++)
+        for(let z=0;z<LAYERS;z++){
+            voxelData[vi++]=x;
+            voxelData[vi++]=y;
+            voxelData[vi++]=z;
+        }
+
+const vao=gl.createVertexArray();
+const vbo=gl.createBuffer();
+
+gl.bindVertexArray(vao);
+gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
+gl.bufferData(gl.ARRAY_BUFFER,voxelData,gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
+gl.bindVertexArray(null);
+
+const U={};
+[
+"uBlobCount","uMode","uThreshold","uBlobPos","uBlobRadius","uBlobColor",
+"uRotation","uScale","uLightCount","uLightDir","uLightColor","uLightIntensity",
+"uPhongEnabled","uPhongPower","uPhongInten","uPhongOpacity",
+"uBulletEnabled","uBulletOpacity","uRoughness",
+"uGlassEnabled","uGlassOpacity","uGlassIOR","uGlassReflect",
+"uMercuryEnabled","uMercuryOpacity","uMercuryPolish","uMercuryReflect",
+"uPlasticEnabled","uPlasticOpacity","uPlasticGloss","uPlasticSpec",
+"uScatteringEnabled","uScatteringOpacity","uScatteringStrength","uScatteringRadius",
+"uEnvironment","uEnvEnabled","uEnvStrength","uEnvRotation","uFogAmount"
+].forEach(n=>U[n]=gl.getUniformLocation(program,n));
+
+/* =========================================================
+   SHADOW / CAUSTIC RECEIVER PLANE
+   ========================================================= */
+
+const PLANE_VS=`#version 300 es
+precision highp float;
+layout(location=0) in vec3 aPlanePos;
+out vec2 vPlaneUV;
+void main(){
+    /* Screen-space floor: deliberately occupies the lower portion of the
+       image so the shadow pixels cannot disappear behind the object. */
+    vPlaneUV=aPlanePos.xy*.5+.5;
+    gl_Position=vec4(aPlanePos.xy,0.60,1.0);
+}`;
+
+const PLANE_FS=`#version 300 es
+precision highp float;
+precision highp int;
+#define MAX_BLOBS ${MAX_BLOBS}
+#define MAX_LIGHTS ${MAX_LIGHTS}
+
+in vec2 vPlaneUV;
+out vec4 outColor;
+
+uniform int uPlaneEnabled;
+uniform float uPlaneBrightness;
+uniform float uShadowOpacity;
+uniform float uShadowSoftness;
+uniform float uCausticStrength;
+uniform float uPixelSize;
+uniform float uTime;
+
+uniform int uBlobCount;
+uniform vec3 uBlobPos[MAX_BLOBS];
+uniform float uBlobRadius[MAX_BLOBS];
+uniform vec3 uBlobColor[MAX_BLOBS];
+uniform int uGlassEnabled;
+uniform int uMercuryEnabled;
+uniform int uLightCount;
+uniform vec3 uLightDir[MAX_LIGHTS];
+uniform vec3 uLightColor[MAX_LIGHTS];
+uniform float uLightIntensity[MAX_LIGHTS];
+
+float sat(float x){return clamp(x,0.0,1.0);}
+
+
+void main(){
+    if(uPlaneEnabled<1)discard;
+
+    /* Ground plane is the lower ~45% of the viewport. */
+    float floorMask=1.0;
+
+    float px=max(1.0,uPixelSize);
+    float gridPx=px/700.0;
+    vec2 uv=floor(vPlaneUV/gridPx+.5)*gridPx;
+
+    vec3 base=vec3(.78,.80,.82)*uPlaneBrightness;
+    float shadow=0.0;
+    vec3 caustic=vec3(0.0);
+
+    /* Convert the lower viewport into the same approximate coordinates used
+       by the voxel camera.  x is horizontal and y is depth along the floor. */
+    float sx=(uv.x-.5)*200.0;
+    float sz=(.50-uv.y)*170.0;
+
+    for(int j=0;j<MAX_LIGHTS;j++){
+        if(j>=uLightCount)break;
+
+        vec3 L=normalize(uLightDir[j]);
+        float lightUp=sat(abs(L.y));
+        float lightFade=max(.20,lightUp)*uLightIntensity[j];
+
+        for(int i=0;i<MAX_BLOBS;i++){
+            if(i>=uBlobCount)break;
+
+            vec3 c=uBlobPos[i]-vec3(32.0);
+            float r=max(.8,uBlobRadius[i]);
+
+            /* Project blob centre onto the floor along the light direction. */
+            float denom=max(.18,abs(L.y));
+            float t=(-25.0-c.y)/(-sign(L.y)*denom);
+            t=clamp(t,4.0,90.0);
+            vec3 hit=c+L*t;
+
+            float dx=sx-hit.x;
+            float dz=sz-hit.z;
+            float d=length(vec2(dx,dz));
+
+            float projectedR=r*(.80+0.012*t);
+            float soft=max(.8,uShadowSoftness*projectedR);
+
+            float core=exp(-(d*d)/(soft*soft*1.7));
+            float halo=exp(-(d*d)/(projectedR*projectedR*5.0));
+            float amount=(core*.88+halo*.22)*lightFade;
+            shadow=max(shadow,amount);
+
+            /* Strong, visible refractive caustic.  It is intentionally
+               accumulated separately from the shadow so it remains visible
+               even when shadow opacity is very low. */
+            if(uGlassEnabled>0 || uMercuryEnabled>0){
+                vec2 q=vec2(dx,dz);
+                float ang=atan(q.y,q.x);
+
+                float ringR=projectedR*.82;
+                float ringW=max(1.2,projectedR*.18);
+                float ring=exp(-pow((d-ringR)/ringW,2.0));
+
+                float innerR=projectedR*.38;
+                float innerW=max(.9,projectedR*.13);
+                float inner=exp(-pow((d-innerR)/innerW,2.0));
+
+                float ripple=.5+.5*sin(
+                    d*.95+ang*6.0+float(i)*2.17+uTime*.0012
+                );
+                float broken=.55+.45*sin(
+                    dx*.72-dz*.51+float(j)*1.9+uTime*.0008
+                );
+
+                float focus=(ring*(.55+.45*ripple)+inner*.42)*broken;
+                focus*=lightFade;
+
+                vec3 lc=uLightColor[j];
+                vec3 bc=uBlobColor[i];
+                vec3 cc=mix(vec3(.55,.72,1.0),bc,.35);
+                cc=mix(cc,lc,.45);
+
+                caustic+=cc*focus;
+
+                /* Bright focal pixels inside the main ring. */
+                float speck=pow(max(0.0,.5+.5*sin(dx*1.8+dz*2.1+ang*9.0+uTime*.002)),7.0);
+                caustic+=cc*speck*ring*.42*lightFade;
+            }
+        }
+    }
+
+    shadow=sat(shadow);
+    base*=1.0-shadow*uShadowOpacity;
+
+    /* Make the caustic unmistakably visible on the receiver. */
+    base+=caustic*uCausticStrength*.72;
+
+    /* Fine floor variation, still pixel based. */
+    float grain=.96+.04*sin(uv.x*900.0+uv.y*700.0);
+    base*=grain;
+
+    /* Fade the far edge, but never the actual shadow/caustic area. */
+    // Uniform studio backdrop: keep the same base treatment across the full screen.
+    base*=1.0;
+
+    outColor=vec4(clamp(base,0.0,1.0),1.0);
+}`;
+
+const planeProgram=createProgram(PLANE_VS,PLANE_FS);
+
+const planeU={};
+[
+'uPlaneY','uPlaneEnabled','uPlaneBrightness','uShadowOpacity','uShadowSoftness','uCausticStrength','uPixelSize','uTime',
+'uBlobCount','uBlobPos','uBlobRadius','uBlobColor','uGlassEnabled','uMercuryEnabled',
+'uLightCount','uLightDir','uLightColor','uLightIntensity'
+].forEach(n=>planeU[n]=gl.getUniformLocation(planeProgram,n));
+
+const planeData=new Float32Array([
+    -1,-1,0,   1,-1,0,   -1,1,0,
+    -1,1,0,    1,-1,0,    1,1,0
+]);
+const planeVAO=gl.createVertexArray();
+const planeVBO=gl.createBuffer();
+gl.bindVertexArray(planeVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER,planeVBO);
+gl.bufferData(gl.ARRAY_BUFFER,planeData,gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
+gl.bindVertexArray(null);
+
+function uploadPlaneUniforms(){
+    gl.uniform1i(planeU.uPlaneEnabled,state.planeEnabled?1:0);
+    gl.uniform1f(planeU.uPlaneBrightness,state.planeBrightness);
+    gl.uniform1f(planeU.uShadowOpacity,state.shadowOpacity);
+    gl.uniform1f(planeU.uShadowSoftness,state.shadowSoftness);
+    gl.uniform1f(planeU.uCausticStrength,state.causticStrength);
+    gl.uniform1f(planeU.uPixelSize,state.planePixelSize);
+    gl.uniform1f(planeU.uTime,time);
+    gl.uniform1i(planeU.uBlobCount,Math.min(blobs.length,MAX_BLOBS));
+    const pos=new Float32Array(MAX_BLOBS*3),rad=new Float32Array(MAX_BLOBS),col=new Float32Array(MAX_BLOBS*3);
+    for(let i=0;i<Math.min(blobs.length,MAX_BLOBS);i++){
+        const b=blobs[i],c=hexToRgb(b.color);
+        pos[i*3]=b.x;pos[i*3+1]=b.y;pos[i*3+2]=b.z;
+        rad[i]=b.radius;col[i*3]=c.r/255;col[i*3+1]=c.g/255;col[i*3+2]=c.b/255;
+    }
+    gl.uniform3fv(planeU.uBlobPos,pos);gl.uniform1fv(planeU.uBlobRadius,rad);gl.uniform3fv(planeU.uBlobColor,col);
+    gl.uniform1i(planeU.uGlassEnabled,state.glassEnabled?1:0);
+    gl.uniform1i(planeU.uMercuryEnabled,state.mercuryEnabled?1:0);
+    const active=lights.filter(l=>l.enabled).slice(0,MAX_LIGHTS);
+    const dirs=new Float32Array(MAX_LIGHTS*3),cols=new Float32Array(MAX_LIGHTS*3),ints=new Float32Array(MAX_LIGHTS);
+    for(let i=0;i<active.length;i++){
+        const l=active[i],r=rotateXYZ(l.x-CEN,l.y-CEN,l.z-CEN),len=Math.hypot(r.x,r.y,r.z)||1,c=hexToRgb(l.color);
+        dirs[i*3]=r.x/len;dirs[i*3+1]=r.y/len;dirs[i*3+2]=r.z/len;
+        cols[i*3]=c.r/255;cols[i*3+1]=c.g/255;cols[i*3+2]=c.b/255;ints[i]=l.intensity;
+    }
+    gl.uniform1i(planeU.uLightCount,active.length);gl.uniform3fv(planeU.uLightDir,dirs);gl.uniform3fv(planeU.uLightColor,cols);gl.uniform1fv(planeU.uLightIntensity,ints);
+}
+
+function renderPlane(){
+    gl.useProgram(planeProgram);
+    uploadPlaneUniforms();
+    gl.uniform1f(planeU.uPlaneY,0.0);
+    gl.bindVertexArray(planeVAO);
+    gl.disable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.drawArrays(gl.TRIANGLES,0,6);
+    gl.bindVertexArray(null);
+}
+
+/* =========================================================
+   POST PROCESS SHADERS
+   ========================================================= */
+
+const POST_VS=`#version 300 es
+precision highp float;
+
+layout(location=0) in vec2 aPos;
+out vec2 vUV;
+
+void main(){
+    vUV=aPos*.5+.5;
+    gl_Position=vec4(aPos,0.0,1.0);
+}`;
+
+const MEDIAN_FS=`#version 300 es
+precision highp float;
+
+uniform sampler2D uTexture;
+uniform vec2 uTexel;
+
+in vec2 vUV;
+out vec4 outColor;
+
+/*
+   Exact scalar median of 9 values.
+   Used independently for R, G, B and A.
+*/
+float median9(
+    float a,
+    float b,
+    float c,
+    float d,
+    float e,
+    float f,
+    float g,
+    float h,
+    float i
+){
+    float x0=a,x1=b,x2=c,x3=d,x4=e,x5=f,x6=g,x7=h,x8=i;
+    float t;
+
+    if(x0>x1){t=x0;x0=x1;x1=t;}
+    if(x3>x4){t=x3;x3=x4;x4=t;}
+    if(x6>x7){t=x6;x6=x7;x7=t;}
+
+    if(x1>x2){t=x1;x1=x2;x2=t;}
+    if(x4>x5){t=x4;x4=x5;x5=t;}
+    if(x7>x8){t=x7;x7=x8;x8=t;}
+
+    if(x0>x1){t=x0;x0=x1;x1=t;}
+    if(x3>x4){t=x3;x3=x4;x4=t;}
+    if(x6>x7){t=x6;x6=x7;x7=t;}
+
+    if(x0>x3){t=x0;x0=x3;x3=t;}
+    if(x1>x4){t=x1;x1=x4;x4=t;}
+    if(x2>x5){t=x2;x2=x5;x5=t;}
+
+    if(x3>x6){t=x3;x3=x6;x6=t;}
+    if(x4>x7){t=x4;x4=x7;x7=t;}
+    if(x5>x8){t=x5;x5=x8;x8=t;}
+
+    if(x1>x3){t=x1;x1=x3;x3=t;}
+    if(x2>x4){t=x2;x2=x4;x4=t;}
+    if(x5>x7){t=x5;x5=x7;x7=t;}
+
+    if(x2>x3){t=x2;x2=x3;x3=t;}
+    if(x4>x5){t=x4;x4=x5;x5=t;}
+
+    return x4;
+}
+
+void main(){
+
+    vec4 p0=texture(uTexture,vUV+uTexel*vec2(-1.0,-1.0));
+    vec4 p1=texture(uTexture,vUV+uTexel*vec2( 0.0,-1.0));
+    vec4 p2=texture(uTexture,vUV+uTexel*vec2( 1.0,-1.0));
+
+    vec4 p3=texture(uTexture,vUV+uTexel*vec2(-1.0, 0.0));
+    vec4 p4=texture(uTexture,vUV);
+    vec4 p5=texture(uTexture,vUV+uTexel*vec2( 1.0, 0.0));
+
+    vec4 p6=texture(uTexture,vUV+uTexel*vec2(-1.0, 1.0));
+    vec4 p7=texture(uTexture,vUV+uTexel*vec2( 0.0, 1.0));
+    vec4 p8=texture(uTexture,vUV+uTexel*vec2( 1.0, 1.0));
+
+    /*
+       Median RGB independently. This is what keeps a
+       blue blob blue instead of letting white highlights
+       contaminate the entire filtered result.
+    */
+    float r=median9(
+        p0.r,p1.r,p2.r,
+        p3.r,p4.r,p5.r,
+        p6.r,p7.r,p8.r
+    );
+
+    float g=median9(
+        p0.g,p1.g,p2.g,
+        p3.g,p4.g,p5.g,
+        p6.g,p7.g,p8.g
+    );
+
+    float b=median9(
+        p0.b,p1.b,p2.b,
+        p3.b,p4.b,p5.b,
+        p6.b,p7.b,p8.b
+    );
+
+    float a=median9(
+        p0.a,p1.a,p2.a,
+        p3.a,p4.a,p5.a,
+        p6.a,p7.a,p8.a
+    );
+
+    outColor=vec4(r,g,b,a);
+}`;
+
+const DISPLAY_FS=`#version 300 es
+precision highp float;
+
+uniform sampler2D uTexture;
+
+in vec2 vUV;
+out vec4 outColor;
+
+void main(){
+    outColor=texture(uTexture,vUV);
+}`;
+
+const medianProgram=createProgram(POST_VS,MEDIAN_FS);
+const displayProgram=createProgram(POST_VS,DISPLAY_FS);
+
+const MU={
+    texture:gl.getUniformLocation(medianProgram,"uTexture"),
+    texel:gl.getUniformLocation(medianProgram,"uTexel")
+};
+
+const DU={
+    texture:gl.getUniformLocation(displayProgram,"uTexture")
+};
+
+const quadVAO=gl.createVertexArray();
+const quadVBO=gl.createBuffer();
+
+gl.bindVertexArray(quadVAO);
+gl.bindBuffer(gl.ARRAY_BUFFER,quadVBO);
+gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array([
+        -1,-1, 1,-1, -1,1,
+        -1,1, 1,-1, 1,1
+    ]),
+    gl.STATIC_DRAW
+);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+gl.bindVertexArray(null);
+
+/* =========================================================
+   GPU RENDER TARGETS
+   ========================================================= */
+
+let fbA=null,fbB=null,fbWidth=0,fbHeight=0;
+
+function createTexture(w,h){
+
+    const tex=gl.createTexture();
+
+    gl.bindTexture(gl.TEXTURE_2D,tex);
+
+    /*
+       NEAREST is intentional: the median shader must receive
+       the actual neighbouring pixels rather than pre-filtered
+       samples.
+    */
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+
+    gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        w,h,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        null
+    );
+
+    gl.bindTexture(gl.TEXTURE_2D,null);
+
+    return tex;
+}
+
+function createFramebuffer(tex){
+
+    const fb=gl.createFramebuffer();
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+
+    gl.framebufferTexture2D(
+        gl.FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        tex,
+        0
+    );
+
+    if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)
+        console.warn("Framebuffer incomplete");
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+
+    return fb;
+}
+
+function ensurePostBuffers(){
+
+    if(
+        fbA &&
+        fbWidth===canvas.width &&
+        fbHeight===canvas.height
+    )return;
+
+    if(fbA){
+
+        gl.deleteFramebuffer(fbA.fb);
+        gl.deleteFramebuffer(fbB.fb);
+        gl.deleteTexture(fbA.tex);
+        gl.deleteTexture(fbB.tex);
+    }
+
+    fbWidth=canvas.width;
+    fbHeight=canvas.height;
+
+    const texA=createTexture(fbWidth,fbHeight);
+    const texB=createTexture(fbWidth,fbHeight);
+
+    fbA={tex:texA,fb:createFramebuffer(texA)};
+    fbB={tex:texB,fb:createFramebuffer(texB)};
+}
+
+/* =========================================================
+   GPU UNIFORMS
+   ========================================================= */
+
+function uploadBlobs(){
+
+    const pos=new Float32Array(MAX_BLOBS*3);
+    const rad=new Float32Array(MAX_BLOBS);
+    const col=new Float32Array(MAX_BLOBS*3);
+
+    const count=Math.min(blobs.length,MAX_BLOBS);
+
+    for(let i=0;i<count;i++){
+
+        const b=blobs[i];
+        const rgb=hexToRgb(b.color);
+
+        pos[i*3]=b.x;
+        pos[i*3+1]=b.y;
+        pos[i*3+2]=b.z;
+
+        rad[i]=b.radius;
+
+        col[i*3]=rgb.r/255;
+        col[i*3+1]=rgb.g/255;
+        col[i*3+2]=rgb.b/255;
+    }
+
+    gl.uniform1i(U.uBlobCount,count);
+    gl.uniform1i(U.uMode,mbMode==="sphere"?0:1);
+    gl.uniform1f(U.uThreshold,metaballThreshold);
+    gl.uniform3fv(U.uBlobPos,pos);
+    gl.uniform1fv(U.uBlobRadius,rad);
+    gl.uniform3fv(U.uBlobColor,col);
+}
+
+function rotateXYZ(x,y,z){
+
+    const rx=state.rotX*Math.PI/180;
+    const ry=state.rotY*Math.PI/180;
+    const rz=state.rotZ*Math.PI/180;
+
+    const cy=Math.cos(rx);
+    const sy=Math.sin(rx);
+
+    let qY=y*cy-z*sy;
+    let qZ=y*sy+z*cy;
+
+    let qX=x*Math.cos(ry)+qZ*Math.sin(ry);
+
+    qZ=-x*Math.sin(ry)+qZ*Math.cos(ry);
+
+    const oX=qX*Math.cos(rz)-qY*Math.sin(rz);
+    const oY=qX*Math.sin(rz)+qY*Math.cos(rz);
+
+    return{x:oX,y:oY,z:qZ};
+}
+
+function uploadLights(){
+
+    const active=
+        lights.filter(l=>l.enabled).slice(0,MAX_LIGHTS);
+
+    const dirs=new Float32Array(MAX_LIGHTS*3);
+    const cols=new Float32Array(MAX_LIGHTS*3);
+    const ints=new Float32Array(MAX_LIGHTS);
+
+    for(let i=0;i<active.length;i++){
+
+        const l=active[i];
+
+        const r=rotateXYZ(
+            l.x-CEN,
+            l.y-CEN,
+            l.z-CEN
+        );
+
+        const len=Math.hypot(r.x,r.y,r.z)||1;
+        const c=hexToRgb(l.color);
+
+        dirs[i*3]=r.x/len;
+        dirs[i*3+1]=r.y/len;
+        dirs[i*3+2]=r.z/len;
+
+        cols[i*3]=c.r/255;
+        cols[i*3+1]=c.g/255;
+        cols[i*3+2]=c.b/255;
+
+        ints[i]=l.intensity;
+    }
+
+    gl.uniform1i(U.uLightCount,active.length);
+    gl.uniform3fv(U.uLightDir,dirs);
+    gl.uniform3fv(U.uLightColor,cols);
+    gl.uniform1fv(U.uLightIntensity,ints);
+}
+
+let environmentTexture=null;
+let environmentIsHDR=false;
+
+function createEnvironmentTexture(){
+    const tex=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    const px=new Uint8Array([180,195,215,255,210,220,235,255,120,135,155,255,75,85,100,255]);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,2,2,0,gl.RGBA,gl.UNSIGNED_BYTE,px);
+    gl.bindTexture(gl.TEXTURE_2D,null);
+    return tex;
+}
+
+environmentTexture=createEnvironmentTexture();
+
+async function asyncEnvTextureFromImage(file){
+    const url=URL.createObjectURL(file);
+    try{
+        const img=new Image();
+        img.src=url;
+        await img.decode();
+        gl.bindTexture(gl.TEXTURE_2D,environmentTexture);
+        gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
+        gl.bindTexture(gl.TEXTURE_2D,null);
+        environmentIsHDR=false;
+        state.envEnabled=true;
+        document.getElementById('envStatus').textContent='Loaded: '+file.name;
+        requestRender();
+    }finally{URL.revokeObjectURL(url);}
+};
+
+function decodeHDR(buffer){
+    const bytes=new Uint8Array(buffer);
+    let p=0, header='';
+    while(p<bytes.length){
+        const lineStart=p;
+        while(p<bytes.length && bytes[p]!==10)p++;
+        const line=new TextDecoder().decode(bytes.subarray(lineStart,p)).replace(/\r$/,'');
+        p++;
+        header+=line+'\n';
+        if(line==='')break;
+    }
+    const m=header.match(/-Y (\d+) \+X (\d+)/);
+    if(!m)throw new Error('Unsupported HDR orientation. Expected -Y height +X width.');
+    const h=+m[1],w=+m[2],out=new Float32Array(w*h*4),scan=new Uint8Array(w*4);
+    for(let y=0;y<h;y++){
+        if(p+4>bytes.length)throw new Error('Invalid HDR data');
+        if(bytes[p]===2&&bytes[p+1]===2&&(bytes[p+2]&128)===0){
+            const sw=(bytes[p+2]<<8)|bytes[p+3];p+=4;
+            if(sw!==w)throw new Error('HDR scanline width mismatch');
+            for(let c=0;c<4;c++){
+                let x=0;
+                while(x<w){
+                    const a=bytes[p++],b=bytes[p++];
+                    if(a>128){const n=a-128;for(let k=0;k<n;k++)scan[c*w+x++]=b;}
+                    else{scan[c*w+x++]=b;for(let k=1;k<a;k++)scan[c*w+x++]=bytes[p++];}
+                }
+            }
+        }else{
+            scan.set(bytes.subarray(p,p+w*4));p+=w*4;
+        }
+        for(let x=0;x<w;x++){
+            const i=y*w+x, e=scan[4*x+3], scale=e?Math.pow(2,e-136):0;
+            out[i*4]=scan[4*x]*scale;
+            out[i*4+1]=scan[4*x+1]*scale;
+            out[i*4+2]=scan[4*x+2]*scale;
+            out[i*4+3]=1;
+        }
+    }
+    return {data:out,width:w,height:h};
+}
+
+async function loadEnvironmentFile(file){
+    try{
+        const name=file.name.toLowerCase();
+        if(name.endsWith('.hdr')){
+            const decoded=decodeHDR(await file.arrayBuffer());
+            gl.bindTexture(gl.TEXTURE_2D,environmentTexture);
+            gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,decoded.width,decoded.height,0,gl.RGBA,gl.FLOAT,decoded.data);
+            gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
+            gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+            gl.bindTexture(gl.TEXTURE_2D,null);
+            environmentIsHDR=true;
+            state.envEnabled=true;
+            document.getElementById('envStatus').textContent='Loaded HDRI: '+file.name;
+            requestRender();
+        }else if(name.endsWith('.exr')){
+            throw new Error('EXR is not decoded by this standalone build yet. Use .HDR, JPG or PNG.');
+        }else{
+            await asyncEnvTextureFromImage(file);
+        }
+    }catch(err){
+        console.error(err);
+        document.getElementById('envStatus').textContent='Could not load map: '+err.message;
+    }
+}
+
+function uploadShading(){
+
+    gl.uniform1i(U.uPhongEnabled,state.phongEnabled?1:0);
+    gl.uniform1f(U.uPhongPower,state.phongPower);
+    gl.uniform1f(U.uPhongInten,state.phongInten);
+    gl.uniform1f(U.uPhongOpacity,state.phongOpacity);
+
+    gl.uniform1i(U.uBulletEnabled,state.bulletEnabled?1:0);
+    gl.uniform1f(U.uBulletOpacity,state.bulletOpacity);
+    gl.uniform1f(U.uRoughness,state.roughness);
+
+    gl.uniform1i(U.uGlassEnabled,state.glassEnabled?1:0);
+    gl.uniform1f(U.uGlassOpacity,state.glassOpacity);
+    gl.uniform1f(U.uGlassIOR,state.glassIOR);
+    gl.uniform1f(U.uGlassReflect,state.glassReflect);
+
+    gl.uniform1i(U.uMercuryEnabled,state.mercuryEnabled?1:0);
+    gl.uniform1f(U.uMercuryOpacity,state.mercuryOpacity);
+    gl.uniform1f(U.uMercuryPolish,state.mercuryPolish);
+    gl.uniform1f(U.uMercuryReflect,state.mercuryReflect);
+
+    gl.uniform1i(U.uPlasticEnabled,state.plasticEnabled?1:0);
+    gl.uniform1f(U.uPlasticOpacity,state.plasticOpacity);
+    gl.uniform1f(U.uPlasticGloss,state.plasticGloss);
+    gl.uniform1f(U.uPlasticSpec,state.plasticSpec);
+
+    gl.uniform1i(U.uScatteringEnabled,state.scatteringEnabled?1:0);
+    gl.uniform1f(U.uScatteringOpacity,state.scatteringOpacity);
+    gl.uniform1f(U.uScatteringStrength,state.scatteringStrength);
+    gl.uniform1f(U.uScatteringRadius,state.scatteringRadius);
+
+    gl.uniform1i(U.uEnvEnabled,state.envEnabled?1:0);
+    gl.uniform1f(U.uEnvStrength,state.envStrength);
+    gl.uniform1f(U.uEnvRotation,state.envRotation);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D,environmentTexture);
+    gl.uniform1i(U.uEnvironment,1);
+
+    gl.uniform1f(U.uFogAmount,state.fogAmount);
+}
+
+/* =========================================================
+   MEDIAN PASS
+   ========================================================= */
+
+function medianPass(source,destination){
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER,destination);
+
+    gl.viewport(0,0,fbWidth,fbHeight);
+
+    gl.useProgram(medianProgram);
+
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D,source);
+
+    gl.uniform1i(MU.texture,0);
+    gl.uniform2f(MU.texel,1/fbWidth,1/fbHeight);
+
+    gl.bindVertexArray(quadVAO);
+
+    gl.drawArrays(
+        gl.TRIANGLES,
+        0,
+        6
+    );
+
+    gl.bindVertexArray(null);
+}
+
+/* =========================================================
+   RENDER PIPELINE
+   ========================================================= */
+
+let gpuDirty=true;
+let frameQueued=false;
+let rendering=false;
+let time=0;
+
+function requestRender(){
+    gpuDirty=true;
+
+    if(frameQueued || rendering)return;
+
+    frameQueued=true;
+    requestAnimationFrame(()=>{
+        frameQueued=false;
+        render();
+    });
+}
+
+function render(){
+
+    if(rendering)return;
+    if(!gpuDirty)return;
+
+    rendering=true;
+    time=performance.now();
+    frameQueued=false;
+    gpuDirty=false;
+
+    ensurePostBuffers();
+
+    /*
+       PASS 0:
+       Render the actual voxel/metaball scene into texture A.
+    */
+
+    gl.bindFramebuffer(
+        gl.FRAMEBUFFER,
+        fbA.fb
+    );
+
+    gl.viewport(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    gl.clearColor(0,0,0,0);
+
+    gl.clear(
+        gl.COLOR_BUFFER_BIT|
+        gl.DEPTH_BUFFER_BIT
+    );
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(
+        gl.SRC_ALPHA,
+        gl.ONE_MINUS_SRC_ALPHA
+    );
+
+    renderPlane();
+
+    gl.useProgram(program);
+
+    uploadBlobs();
+    uploadLights();
+    uploadShading();
+
+    gl.uniform3f(
+        U.uRotation,
+        state.rotX,
+        state.rotY,
+        state.rotZ
+    );
+
+    gl.uniform1f(
+        U.uScale,
+        SPACING/(CANVAS_SIZE/2)
+    );
+
+    gl.bindVertexArray(vao);
+    gl.drawArrays(
+        gl.POINTS,
+        0,
+        voxelData.length/3
+    );
+    gl.bindVertexArray(null);
+
+    /*
+       Four successive GPU median passes.
+
+       A -> B
+       B -> A
+       A -> B
+       B -> A
+
+       Therefore "source" below is always the result
+       of all four filters.
+    */
+
+    let source=fbA.tex;
+    let destination=fbB.fb;
+
+    for(let i=0;i<MEDIAN_PASSES;i++){
+
+        medianPass(
+            source,
+            destination
+        );
+
+        source=
+            destination===fbA.fb
+            ?fbA.tex
+            :fbB.tex;
+
+        destination=
+            destination===fbA.fb
+            ?fbB.fb
+            :fbA.fb;
+    }
+
+    /*
+       Final GPU display.
+    */
+
+    gl.bindFramebuffer(
+        gl.FRAMEBUFFER,
+        null
+    );
+
+    gl.viewport(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    gl.clearColor(0,0,0,0);
+
+    gl.clear(
+        gl.COLOR_BUFFER_BIT
+    );
+
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+
+    gl.useProgram(displayProgram);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D,source);
+
+    gl.uniform1i(
+        DU.texture,
+        0
+    );
+
+    gl.bindVertexArray(quadVAO);
+
+    gl.drawArrays(
+        gl.TRIANGLES,
+        0,
+        6
+    );
+
+    gl.bindVertexArray(null);
+
+    rendering=false;
+
+    /* If UI input marked the frame dirty while this GPU submission was
+       running, schedule exactly one follow-up frame. */
+    if(gpuDirty && !frameQueued){
+        frameQueued=true;
+        requestAnimationFrame(()=>{
+            frameQueued=false;
+            render();
+        });
+    }
+}
+
+/* =========================================================
+   EDITOR PREVIEW
+   ========================================================= */
+
+function sampleMetaballField(x,y,z){
+
+    let field=0;
+
+    for(const b of blobs){
+
+        const dx=x-b.x;
+        const dy=y-b.y;
+        const dz=z-b.z;
+
+        const rSq=dx*dx+dy*dy+dz*dz;
+
+        if(rSq===0)return 100;
+
+        field+=
+            b.radius*b.radius/
+            rSq;
+    }
+
+    return field;
+}
+
+function updatePreviewCanvas(){
+
+    const preview=document.getElementById("mbPreview");
+
+    if(!preview)return;
+
+    const pctx=preview.getContext("2d");
+    const psize=180;
+
+    preview.width=psize;
+    preview.height=psize;
+
+    pctx.clearRect(
+        0,0,
+        psize,
+        psize
+    );
+
+    const scale=psize/GRID;
+
+    for(let x=0;x<GRID;x++){
+
+        for(let y=0;y<GRID;y++){
+
+            const field=
+                sampleMetaballField(
+                    x,y,CEN
+                );
+
+            if(field>=metaballThreshold){
+
+                let maxW=0;
+                let col="#00a2e8";
+
+                for(const b of blobs){
+
+                    const d=
+                        Math.hypot(
+                            x-b.x,
+                            y-b.y
+                        );
+
+                    const w=
+                        b.radius*b.radius/
+                        (d*d+.1);
+
+                    if(w>maxW){
+
+                        maxW=w;
+                        col=b.color;
+                    }
+                }
+
+                pctx.fillStyle=col;
+
+                pctx.fillRect(
+                    x*scale,
+                    y*scale,
+                    scale+.5,
+                    scale+.5
+                );
+            }
+        }
+    }
+}
+
+function rebuildVoxelsFromBlobs(){
+
+    state.dots=[];
+
+    updatePreviewCanvas();
+
+    requestRender();
+}
+
+/* =========================================================
+   METABALL UI
+   ========================================================= */
+
+function addBlob(x,y,z,radius,color){
+
+    blobCounter++;
+
+    blobs.push({
+        id:blobCounter,
+        name:"Blob "+blobCounter,
+        x:x??CEN,
+        y:y??CEN,
+        z:z??CEN,
+        radius:radius??12,
+        color:color??"#00a2e8"
+    });
+
+    selectedBlobIndex=blobs.length-1;
+
+    rebuildVoxelsFromBlobs();
+    renderMetaballUI();
+}
+
+function removeBlob(index){
+
+    if(blobs.length<=1)return;
+
+    blobs.splice(index,1);
+
+    if(selectedBlobIndex>=blobs.length)
+        selectedBlobIndex=blobs.length-1;
+
+    rebuildVoxelsFromBlobs();
+    renderMetaballUI();
+}
+
+function selectBlob(index){
+
+    selectedBlobIndex=index;
+    renderMetaballUI();
+}
+
+function renderMetaballUI(){
+
+    const listEl=document.getElementById("mbBlobList");
+    const editorEl=document.getElementById("mbBlobEditor");
+
+    if(!listEl||!editorEl)return;
+
+    listEl.innerHTML="";
+
+    blobs.forEach((blob,idx)=>{
+
+        const item=document.createElement("div");
+
+        item.className=
+            `mb-blob-item ${
+                idx===selectedBlobIndex
+                ?"selected"
+                :""
+            }`;
+
+        item.innerHTML=`
+            <div class="mb-blob-top">
+                <span style="display:flex;align-items:center;gap:6px;">
+                    <span style="width:12px;height:12px;border-radius:50%;background:${blob.color};"></span>
+                    ${blob.name} (r${blob.radius})
+                </span>
+                <button class="mb-remove-blob" data-idx="${idx}">&times;</button>
+            </div>`;
+
+        item.onclick=e=>{
+
+            if(
+                e.target.classList.contains(
+                    "mb-remove-blob"
+                )
+            ){
+
+                removeBlob(
+                    parseInt(
+                        e.target.dataset.idx
+                    )
+                );
+
+            }else{
+
+                selectBlob(idx);
+            }
+        };
+
+        listEl.appendChild(item);
+    });
+
+    const blob=blobs[selectedBlobIndex];
+
+    if(!blob)return;
+
+    editorEl.innerHTML=`
+
+        <div class="control-item">
+            <label>Pos X: <span id="bXVal">${blob.x.toFixed(0)}</span></label>
+            <input type="range" id="bX" min="5" max="59" value="${blob.x}">
+        </div>
+
+        <div class="control-item">
+            <label>Pos Y: <span id="bYVal">${blob.y.toFixed(0)}</span></label>
+            <input type="range" id="bY" min="5" max="59" value="${blob.y}">
+        </div>
+
+        <div class="control-item">
+            <label>Pos Z: <span id="bZVal">${blob.z.toFixed(0)}</span></label>
+            <input type="range" id="bZ" min="5" max="59" value="${blob.z}">
+        </div>
+
+        <div class="control-item">
+            <label>Radius: <span id="bRVal">${blob.radius.toFixed(0)}</span></label>
+            <input type="range" id="bR" min="4" max="24" value="${blob.radius}">
+        </div>
+
+        <div class="control-item color-input-wrap" style="grid-column:1/-1;">
+            <label>Color:</label>
+            <input type="color" id="bCol" value="${blob.color}">
+        </div>`;
+
+    document.getElementById("bX").oninput=e=>{
+        blob.x=+e.target.value;
+        document.getElementById("bXVal").textContent=blob.x.toFixed(0);
+        rebuildVoxelsFromBlobs();
+    };
+
+    document.getElementById("bY").oninput=e=>{
+        blob.y=+e.target.value;
+        document.getElementById("bYVal").textContent=blob.y.toFixed(0);
+        rebuildVoxelsFromBlobs();
+    };
+
+    document.getElementById("bZ").oninput=e=>{
+        blob.z=+e.target.value;
+        document.getElementById("bZVal").textContent=blob.z.toFixed(0);
+        rebuildVoxelsFromBlobs();
+    };
+
+    document.getElementById("bR").oninput=e=>{
+        blob.radius=+e.target.value;
+        document.getElementById("bRVal").textContent=blob.radius.toFixed(0);
+        rebuildVoxelsFromBlobs();
+    };
+
+    document.getElementById("bCol").oninput=e=>{
+        blob.color=e.target.value;
+        state.color=e.target.value;
+        rebuildVoxelsFromBlobs();
+        renderMetaballUI();
+    };
+}
+
+/* =========================================================
+   LIGHT UI
+   ========================================================= */
+
+function addLight(x,y,z,color,intensity){
+
+    lightCounter++;
+
+    lights.push({
+        id:lightCounter,
+        name:"Light "+lightCounter,
+        x:x??15,
+        y:y??15,
+        z:z??20,
+        color:color??"#ffffff",
+        intensity:intensity??1,
+        enabled:true
+    });
+
+    selectedLightIndex=lights.length-1;
+
+    renderLightUI();
+    requestRender();
+}
+
+function removeLight(index){
+
+    if(lights.length<=1)return;
+
+    lights.splice(index,1);
+
+    if(selectedLightIndex>=lights.length)
+        selectedLightIndex=lights.length-1;
+
+    renderLightUI();
+    requestRender();
+}
+
+function selectLight(index){
+
+    selectedLightIndex=index;
+    renderLightUI();
+}
+
+function renderLightUI(){
+
+    const listEl=document.getElementById("lightList");
+    const editorEl=document.getElementById("lightEditor");
+
+    if(!listEl||!editorEl)return;
+
+    listEl.innerHTML="";
+
+    lights.forEach((light,idx)=>{
+
+        const tab=document.createElement("button");
+
+        tab.className=
+            `light-tab ${
+                idx===selectedLightIndex
+                ?"active"
+                :""
+            }`;
+
+        tab.innerHTML=`
+            <span class="light-dot" style="background:${light.color}"></span>
+            ${light.name}
+            <span class="remove-light" data-idx="${idx}">&times;</span>`;
+
+        tab.onclick=e=>{
+
+            if(
+                e.target.classList.contains(
+                    "remove-light"
+                )
+            ){
+
+                removeLight(
+                    parseInt(
+                        e.target.dataset.idx
+                    )
+                );
+
+            }else{
+
+                selectLight(idx);
+            }
+        };
+
+        listEl.appendChild(tab);
+    });
+
+    const light=lights[selectedLightIndex];
+
+    if(!light)return;
+
+    editorEl.innerHTML=`
+
+        <div class="control-item">
+            <label>Enabled: <input type="checkbox" id="lightEnabled" ${light.enabled?"checked":""}></label>
+        </div>
+
+        <div class="control-item">
+            <label>Pos X: <span id="lXVal">${light.x.toFixed(0)}</span></label>
+            <input type="range" id="lX" min="0" max="64" value="${light.x}">
+        </div>
+
+        <div class="control-item">
+            <label>Pos Y: <span id="lYVal">${light.y.toFixed(0)}</span></label>
+            <input type="range" id="lY" min="0" max="64" value="${light.y}">
+        </div>
+
+        <div class="control-item">
+            <label>Pos Z: <span id="lZVal">${light.z.toFixed(0)}</span></label>
+            <input type="range" id="lZ" min="0" max="63" value="${light.z}">
+        </div>
+
+        <div class="control-item">
+            <label>Intensity: <span id="lIntVal">${light.intensity.toFixed(2)}</span></label>
+            <input type="range" id="lInt" min=".1" max="3" step=".05" value="${light.intensity}">
+        </div>
+
+        <div class="control-item color-input-wrap">
+            <label>Color:</label>
+            <input type="color" id="lColor" value="${light.color}">
+        </div>`;
+
+    document.getElementById("lightEnabled").onchange=e=>{
+        light.enabled=e.target.checked;
+        requestRender();
+    };
+
+    document.getElementById("lX").oninput=e=>{
+        light.x=+e.target.value;
+        document.getElementById("lXVal").textContent=light.x.toFixed(0);
+        requestRender();
+    };
+
+    document.getElementById("lY").oninput=e=>{
+        light.y=+e.target.value;
+        document.getElementById("lYVal").textContent=light.y.toFixed(0);
+        requestRender();
+    };
+
+    document.getElementById("lZ").oninput=e=>{
+        light.z=+e.target.value;
+        document.getElementById("lZVal").textContent=light.z.toFixed(0);
+        requestRender();
+    };
+
+    document.getElementById("lInt").oninput=e=>{
+        light.intensity=+e.target.value;
+        document.getElementById("lIntVal").textContent=light.intensity.toFixed(2);
+        requestRender();
+    };
+
+    document.getElementById("lColor").oninput=e=>{
+        light.color=e.target.value;
+        renderLightUI();
+        requestRender();
+    };
+}
+
+/* =========================================================
+   UI BINDINGS
+   ========================================================= */
+
+addBlob(CEN,CEN,CEN,18,"#00a2e8");
+addLight(15,15,20,"#ffffff",1);
+
+document.getElementById("mbToggle").onclick=()=>{
+    document.getElementById("mbPanel").classList.toggle("open");
+};
+
+document.getElementById("mbClose").onclick=()=>{
+    document.getElementById("mbPanel").classList.remove("open");
+};
+
+document.getElementById("mbAddBlob").onclick=()=>{
+
+    const randColor=
+        "#"+
+        Math.floor(
+            Math.random()*16777215
+        )
+        .toString(16)
+        .padStart(6,"0");
+
+    addBlob(
+        CEN+(Math.random()-.5)*30,
+        CEN+(Math.random()-.5)*30,
+        CEN+(Math.random()-.5)*30,
+        8+Math.random()*10,
+        randColor
+    );
+};
+
+document.getElementById("mbThreshold").oninput=e=>{
+
+    metaballThreshold=+e.target.value;
+
+    document.getElementById(
+        "mbThreshVal"
+    ).textContent=
+        metaballThreshold.toFixed(2);
+
+    rebuildVoxelsFromBlobs();
+};
+
+document.querySelectorAll(".mb-mode-btn").forEach(btn=>{
+
+    btn.onclick=()=>{
+
+        mbMode=btn.dataset.mode;
+
+        document.querySelectorAll(
+            ".mb-mode-btn"
+        ).forEach(
+            b=>b.classList.remove("active")
+        );
+
+        btn.classList.add("active");
+
+        rebuildVoxelsFromBlobs();
+    };
+});
+
+document.getElementById("addLightBtn").onclick=()=>{
+
+    const randColor=
+        "#"+
+        Math.floor(
+            Math.random()*16777215
+        )
+        .toString(16)
+        .padStart(6,"0");
+
+    addLight(
+        10+Math.random()*44,
+        10+Math.random()*44,
+        10+Math.random()*44,
+        randColor,
+        .8+Math.random()*.6
+    );
+};
+
+const mainPalette=
+    document.getElementById("mainPalette");
+
+MS_PAINT_COLORS.forEach(c=>{
+
+    const btn=document.createElement("button");
+
+    btn.className=
+        "swatch"+
+        (state.color===c?" selected":"");
+
+    btn.style.background=c;
+
+    btn.onclick=()=>{
+
+        state.color=c;
+
+        if(blobs[selectedBlobIndex])
+            blobs[selectedBlobIndex].color=c;
+
+        rebuildVoxelsFromBlobs();
+
+        mainPalette
+            .querySelectorAll(".swatch")
+            .forEach(
+                s=>s.classList.remove("selected")
+            );
+
+        btn.classList.add("selected");
+
+        renderMetaballUI();
+    };
+
+    mainPalette.appendChild(btn);
+});
+
+function bindSlider(id,valId,prop,fmt,onChange){
+
+    const el=document.getElementById(id);
+    const valEl=document.getElementById(valId);
+
+    el.oninput=()=>{
+
+        state[prop]=+el.value;
+
+        valEl.textContent=
+            fmt
+            ?fmt(state[prop])
+            :el.value;
+
+        if(onChange)onChange();
+
+        requestRender();
+    };
+}
+
+
+bindSlider("phongPower","phongPowerVal","phongPower",v=>v.toFixed(0));
+bindSlider("phongInten","phongIntenVal","phongInten",v=>v.toFixed(2));
+bindSlider("phongOpacity","phongOpacityVal","phongOpacity",v=>v.toFixed(2));
+bindSlider("bulletOpacity","bulletOpacityVal","bulletOpacity",v=>v.toFixed(2));
+bindSlider("roughness","roughnessVal","roughness",v=>v.toFixed(2));
+bindSlider("glassOpacity","glassOpacityVal","glassOpacity",v=>v.toFixed(2));
+bindSlider("glassIOR","glassIORVal","glassIOR",v=>v.toFixed(2));
+bindSlider("glassReflect","glassReflectVal","glassReflect",v=>v.toFixed(2));
+
+bindSlider("mercuryOpacity","mercuryOpacityVal","mercuryOpacity",v=>v.toFixed(2));
+bindSlider("mercuryPolish","mercuryPolishVal","mercuryPolish",v=>v.toFixed(2));
+bindSlider("mercuryReflect","mercuryReflectVal","mercuryReflect",v=>v.toFixed(2));
+bindSlider("plasticOpacity","plasticOpacityVal","plasticOpacity",v=>v.toFixed(2));
+bindSlider("plasticGloss","plasticGlossVal","plasticGloss",v=>v.toFixed(2));
+bindSlider("plasticSpec","plasticSpecVal","plasticSpec",v=>v.toFixed(2));
+bindSlider("scatteringOpacity","scatteringOpacityVal","scatteringOpacity",v=>v.toFixed(2));
+bindSlider("scatteringStrength","scatteringStrengthVal","scatteringStrength",v=>v.toFixed(2));
+bindSlider("scatteringRadius","scatteringRadiusVal","scatteringRadius",v=>v.toFixed(2));
+bindSlider("envStrength","envStrengthVal","envStrength",v=>v.toFixed(2));
+bindSlider("envRotation","envRotationVal","envRotation",v=>v.toFixed(0)+"°");
+bindSlider("fogAmount","fogAmountVal","fogAmount",v=>v.toFixed(2));
+bindSlider("planeBrightness","planeBrightnessVal","planeBrightness",v=>v.toFixed(2));
+bindSlider("shadowOpacity","shadowOpacityVal","shadowOpacity",v=>v.toFixed(3));
+bindSlider("shadowSoftness","shadowSoftnessVal","shadowSoftness",v=>v.toFixed(2));
+bindSlider("causticStrength","causticStrengthVal","causticStrength",v=>v.toFixed(2));
+bindSlider("planePixelSize","planePixelSizeVal","planePixelSize",v=>v.toFixed(0));
+
+/* Shader switches are treated as mutually exclusive material modes.
+   This prevents two shading models from being accumulated together when
+   changing modes, which was the main source of the switching glitch. */
+const shaderModes=[
+    ["phongEnabled","phongEnabled"],
+    ["bulletEnabled","bulletEnabled"],
+    ["glassEnabled","glassEnabled"],
+    ["mercuryEnabled","mercuryEnabled"],
+    ["plasticEnabled","plasticEnabled"],
+    ["scatteringEnabled","scatteringEnabled"]
+];
+
+shaderModes.forEach(([id,prop])=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+
+    el.onchange=()=>{
+        if(el.checked){
+            for(const [otherId,otherProp] of shaderModes){
+                if(otherId===id)continue;
+                const other=document.getElementById(otherId);
+                if(other){
+                    other.checked=false;
+                    state[otherProp]=false;
+                }
+            }
+            state[prop]=true;
+        }else{
+            state[prop]=false;
+        }
+
+        requestRender();
+    };
+});
+
+
+// Keep the material mode deterministic on startup.
+for(const [id,prop] of shaderModes){
+    const el=document.getElementById(id);
+    if(el)el.checked=!!state[prop];
+}
+
+[
+    ["envEnabled","envEnabled"],
+    ["planeEnabled","planeEnabled"]
+].forEach(([id,prop])=>{
+    const el=document.getElementById(id);
+    if(el)el.onchange=()=>{
+        state[prop]=el.checked;
+        requestRender();
+    };
+});
+
+document.getElementById("envFile").onchange=e=>{
+    const file=e.target.files&&e.target.files[0];
+    if(file)loadEnvironmentFile(file);
+};
+
+const viewerCanvas=canvas;
+let touchRotX=20,touchRotY=45,touchRotZ=0;
+let pointers=new Map();
+let gestureMode=0;
+let lastSingle=null;
+let lastMid=null;
+let lastAngle=null;
+
+function syncTouchRotation(){
+    state.rotX=touchRotX;
+    state.rotY=touchRotY;
+    state.rotZ=touchRotZ;
+    requestRender();
+}
+
+function angleDelta(a,b){
+    let d=a-b;
+    while(d>180)d-=360;
+    while(d<-180)d+=360;
+    return d;
+}
+
+function resetGesture(){
+    const pts=[...pointers.values()];
+    gestureMode=pts.length>=2?2:(pts.length===1?1:0);
+    lastSingle=pts.length===1?{x:pts[0].x,y:pts[0].y}:null;
+    if(pts.length>=2){
+        const a=pts[0],b=pts[1];
+        lastMid={x:(a.x+b.x)/2,y:(a.y+b.y)/2};
+        lastAngle=Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI;
+    }else{
+        lastMid=null;
+        lastAngle=null;
+    }
+}
+
+canvas.style.touchAction='none';
+canvas.addEventListener('pointerdown',e=>{
+    e.preventDefault();
+    try{canvas.setPointerCapture(e.pointerId);}catch(_){}
+    pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    canvas.classList.add('dragging');
+    resetGesture();
+});
+
+canvas.addEventListener('pointermove',e=>{
+    if(!pointers.has(e.pointerId))return;
+    e.preventDefault();
+    pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    const pts=[...pointers.values()];
+
+    if(pts.length===1){
+        if(gestureMode!==1){
+            resetGesture();
+            return;
+        }
+        const p=pts[0];
+        if(lastSingle){
+            touchRotY+=(p.x-lastSingle.x)*0.45;
+            touchRotX+=(p.y-lastSingle.y)*0.45;
+            syncTouchRotation();
+        }
+        lastSingle={x:p.x,y:p.y};
+        return;
+    }
+
+    if(pts.length>=2){
+        if(gestureMode!==2){
+            resetGesture();
+            return;
+        }
+        const a=pts[0],b=pts[1];
+        const mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2};
+        const ang=Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI;
+
+        if(lastMid){
+            touchRotY+=(mid.x-lastMid.x)*0.45;
+            touchRotX+=(mid.y-lastMid.y)*0.45;
+        }
+        if(lastAngle!==null){
+            touchRotZ+=angleDelta(ang,lastAngle);
+        }
+        lastMid=mid;
+        lastAngle=ang;
+        syncTouchRotation();
+    }
+});
+
+function endPointer(e){
+    pointers.delete(e.pointerId);
+    try{canvas.releasePointerCapture(e.pointerId);}catch(_){}
+    if(pointers.size===0){
+        gestureMode=0;
+        lastSingle=null;
+        lastMid=null;
+        lastAngle=null;
+        canvas.classList.remove('dragging');
+    }else{
+        // Reset baselines when changing from one finger to two, or back again.
+        resetGesture();
+    }
+}
+
+canvas.addEventListener('pointerup',endPointer);
+canvas.addEventListener('pointercancel',endPointer);
+canvas.addEventListener('pointerleave',e=>{
+    if(e.pointerType==='mouse' && e.buttons===0)endPointer(e);
+});
+})();
+</script>
+</body>
+</html>
